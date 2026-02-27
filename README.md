@@ -1,4 +1,3 @@
-
 # llm_bt_builder
 
 Iterative Behavior Tree generator using Large Language Models (LLMs) for ROS 2 robots. Automatically creates Behavior Trees in XML format, using custom nodes defined in YAML and iterative reasoning with LLMs (local or API).
@@ -90,6 +89,49 @@ bt_nodes:
     type: "Action"
     description: "Speaks medical results. Parameters: metric_key (string)"
 ```
+
+## Serving Local Models with Ollama
+
+If you want to serve models locally using Ollama's API, follow these steps:
+
+### Install Ollama
+
+Visit [https://ollama.com/download](https://ollama.com/download) and follow the instructions for your operating system.
+
+### Start Ollama Server
+
+Once installed, start the Ollama server (it runs as a background service):
+```bash
+ollama serve
+```
+
+### Pull a Model
+
+You need to pull a model before using it. For example, to pull the Qwen2.5-Coder model:
+```bash
+ollama pull qwen2.5-coder:1.5b
+```
+Or for Llama 3:
+```bash
+ollama pull llama3
+```
+
+### Test the API
+
+You can test the API locally with curl:
+```bash
+curl http://localhost:11434/api/tags
+```
+
+### Use with llm_bt_builder
+
+Set the following parameters in your launch file or node configuration:
+- `execution_mode`: `api`
+- `model_id`: The model name (e.g., `qwen2.5-coder:1.5b`)
+- `api_url`: `http://localhost:11434/v1/chat/completions`
+- `api_key`: (leave empty, not required for local Ollama)
+
+This will allow llm_bt_builder to use your local Ollama server for LLM-based Behavior Tree generation.
 
 ## Local Mode vs API
 
