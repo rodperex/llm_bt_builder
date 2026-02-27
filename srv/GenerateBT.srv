@@ -1,0 +1,8 @@
+# Request
+string objective
+string bt_nodes_yaml
+---
+# Response
+bool success
+string bt_xml
+string message

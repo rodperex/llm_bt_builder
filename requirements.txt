@@ -1,0 +1,12 @@
+
+# --- Dependencias base (Modo API y utilidades) ---
+PyYAML>=6.0
+requests>=2.28.0
+ament-index-python
+
+# --- Dependencias para el Modo Local (Hugging Face) ---
+# Nota: Si solo vas a usar el modo API, puedes omitir estas tres.
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.3
+bitsandbytes
