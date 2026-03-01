@@ -1,0 +1,5 @@
+You have to explain to the person how the walking speed test works. The test consists of the person walking at their normal speed until you tell them to stop.
+They are not going to do it yet; we just want them to understand it for later.
+Make sure they have understood the explanation by asking them explicitly.
+If they do not understand, explain it again until they do.
+If they do, let them know that you are ready to continue with the test.

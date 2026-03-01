@@ -5,4 +5,4 @@ prompts/*.bak
 prompts/*.json
 xml/*.xml
 objectives/*.txt
-!objectives/example_sp.txt
+!objectives/example.txt
