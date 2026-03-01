@@ -43,6 +43,12 @@ def generate_launch_description():
         description='Agent type: "rag" for RAG agent, "normal" for standard agent'
     )
 
+    prompt_file_arg = DeclareLaunchArgument(
+        'prompt_file',
+        default_value='system_prompt.txt',
+        description='Prompt file name in prompts/ directory (e.g., system_prompt.txt)'
+    )
+
     # RAG node
     rag_node = Node(
         package='llm_bt_builder',
@@ -54,7 +60,8 @@ def generate_launch_description():
             'model_id': LaunchConfiguration('model'),
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
-            'api_key': LaunchConfiguration('key')
+            'api_key': LaunchConfiguration('key'),
+            'prompt_file': LaunchConfiguration('prompt_file')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'rag'"])
@@ -72,7 +79,8 @@ def generate_launch_description():
             'model_id': LaunchConfiguration('model'),
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
-            'api_key': LaunchConfiguration('key')
+            'api_key': LaunchConfiguration('key'),
+            'prompt_file': LaunchConfiguration('prompt_file')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'normal'"])
@@ -85,6 +93,7 @@ def generate_launch_description():
         url_arg,
         key_arg,
         agent_type_arg,
+        prompt_file_arg,
         rag_node,
         normal_node
     ])

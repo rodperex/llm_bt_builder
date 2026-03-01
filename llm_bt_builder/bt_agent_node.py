@@ -20,6 +20,7 @@ class BTAgentNode(Node):
         self.declare_parameter('model_cache_dir', './llm_models')
         self.declare_parameter('api_url', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
         self.declare_parameter('api_key', '')
+        self.declare_parameter('prompt_file', 'system_prompt.txt')
         
         # Load parameters
         self.mode = self.get_parameter('execution_mode').value
@@ -61,8 +62,10 @@ class BTAgentNode(Node):
 
     def load_prompt_template(self):
         try:
+            prompt_file = self.get_parameter('prompt_file').value
+            self.get_logger().info(f"📄 Loading prompt template from: {prompt_file}")
             pkg_share_dir = get_package_share_directory('llm_bt_builder')
-            path = os.path.join(pkg_share_dir, 'prompts', 'system_prompt.txt')
+            path = os.path.join(pkg_share_dir, 'prompts', prompt_file)
             with open(path, 'r', encoding='utf-8') as f: return f.read()
         except Exception: return None
 
@@ -118,6 +121,14 @@ class BTAgentNode(Node):
                 time.sleep(5.0)
                 continue
             
+            # Print chain of thought if present
+            think_match = re.search(r'<think>(.*?)</think>', raw_reply, re.DOTALL)
+            if think_match:
+                thought_process = think_match.group(1).strip()
+                self.get_logger().info(f"\n🤔 CHAIN OF THOUGHT:\n\033[93m{thought_process}\033[0m\n")
+            else:
+                self.get_logger().info("⚠️ No <think> tags found in the response.")
+
             xml_str = self.extract_xml(raw_reply)
             
             # === PHASE 1: SYNTACTIC VALIDATION ===
@@ -266,9 +277,20 @@ class BTAgentNode(Node):
         return None
 
     def extract_xml(self, text):
+        # Remove chain of thought
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # Try to extract from ```xml ... ``` block
         match = re.search(r'```xml(.*?)```', text, re.DOTALL)
-        xml_str = match.group(1).strip() if match else text.strip()
-        return xml_str.replace('{{', '{').replace('}}', '}')
+        if match:
+            return match.group(1).strip().replace('{{', '{').replace('}}', '}')
+        # If not found, try to extract from <root>...</root>
+        if '<root' in text:
+            start = text.find('<root')
+            end = text.rfind('</root>')
+            if end != -1:
+                return text[start:end+7].replace('{{', '{').replace('}}', '}')
+        # Fallback: return cleaned text
+        return text.strip().replace('{{', '{').replace('}}', '}')
 
 def main(args=None):
     rclpy.init(args=args)

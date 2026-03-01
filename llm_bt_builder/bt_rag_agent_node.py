@@ -31,6 +31,7 @@ class RagBTAgent(Node):
         self.declare_parameter('model_id', 'gemini-2.0-flash-lite')
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
+        self.declare_parameter('prompt_file', 'system_prompt.txt')
 
         self.model_id = self.get_parameter('model_id').value
         self.api_url = self.get_parameter('api_url').value
@@ -81,12 +82,14 @@ class RagBTAgent(Node):
 
     def load_prompt_template(self):
         try:
+            prompt_file = self.get_parameter('prompt_file').value
+            self.get_logger().info(f"📄 Loading prompt template from: {prompt_file}")
             # Try to load the prompt from the installed share directory
             pkg_path = get_package_share_directory('llm_bt_builder')
-            prompt_path = os.path.join(pkg_path, 'prompts', 'system_prompt.txt')
+            prompt_path = os.path.join(pkg_path, 'prompts', prompt_file)
             if not os.path.exists(prompt_path):
                 # Fallback to local development path
-                prompt_path = os.path.join(os.getcwd(), 'src', 'llm_bt_builder', 'prompts', 'system_prompt.txt')
+                prompt_path = os.path.join(os.getcwd(), 'src', 'llm_bt_builder', 'prompts', prompt_file)
 
             if os.path.exists(prompt_path):
                 with open(prompt_path, 'r') as f: return f.read()
@@ -170,6 +173,16 @@ class RagBTAgent(Node):
 
             try:
                 ai_msg = self.llm.invoke(messages)
+                raw_response = ai_msg.content
+
+                think_match = re.search(r'<think>(.*?)</think>', raw_response, re.DOTALL)
+                
+                if think_match:
+                    thought_process = think_match.group(1).strip()
+                    self.get_logger().info(f"\n🤔 CHAIN OF THOUGHT:\n\033[93m{thought_process}\033[0m\n")
+                else:
+                    self.get_logger().info("⚠️ No <think> tags found in the response.")
+
                 xml_str = self.extract_xml(ai_msg.content)
 
                 # A. Syntactic Validation
