@@ -125,24 +125,83 @@ See the "Launch Client Node" section above for usage examples.
 
 Define your robot's capabilities in YAML format. The agent nodes use this to generate valid Behavior Trees.
 
+### Basic Structure
+
+Each node definition includes:
+- **name**: Node identifier
+- **type**: `Action`, `Condition`, `Decorator`, or `Control`
+- **description**: Brief description of what the node does
+- **ports**: Input and output parameters
+- **return**: Return status conditions (SUCCESS, RUNNING, FAILURE)
+
+### Example Format
+
 ```yaml
 bt_nodes:
-  - name: "SpeakToPerson"
+  - name: "Speak"
     type: "Action"
-    description: "Synthesizes speech. Parameters: text (string)"
-  - name: "AskConfirmation"
-    type: "Action"
-    description: "Asks the person for confirmation and waits for 'yes' or 'no'. Returns SUCCESS if yes, FAILURE if no or no response."
-  - name: "DetectPerson"
+    description: "Synthesizes and speaks the specified text using a TTS service."
+    ports:
+      - name: "text"
+        direction: "Input"
+        type: "string"
+        description: "Text to be spoken."
+      - name: "service_name"
+        direction: "Input"
+        type: "string"
+        description: "Name of the TTS service (optional, default: /tts_service)."
+      - name: "timeout"
+        direction: "Input"
+        type: "int"
+        description: "Maximum wait time in ms (optional, default: 5000)."
+    return:
+      SUCCESS: "The speech has been completed (service responds and estimated speech duration elapses)."
+      RUNNING: "Waiting for the service response or during speech playback."
+      FAILURE: "The service is unavailable, the text parameter is missing, or the service call fails."
+
+  - name: "IsTargetDetected"
     type: "Condition"
-    description: "Checks if a person is in front of the robot. Parameters: timeout (int)"
-  - name: "TrackAndMeasureGait"
+    description: "Checks if a target is detected using TF transforms."
+    ports:
+      - name: "target_frame"
+        direction: "Input"
+        type: "string"
+        description: "Target frame to search for."
+      - name: "base_frame"
+        direction: "Input"
+        type: "string"
+        description: "Base reference frame."
+      - name: "timeout"
+        direction: "Input"
+        type: "float"
+        description: "Maximum wait time in seconds."
+    return:
+      SUCCESS: "The target frame is found and the transform is recent (not stale)."
+      FAILURE: "Required inputs are missing, the transform cannot be found, or the transform is older than the timeout threshold."
+
+  - name: "Follow"
     type: "Action"
-    description: "Follows the person and measures speed. Parameters: distance_meters (float)"
-  - name: "ReportResults"
-    type: "Action"
-    description: "Speaks medical results. Parameters: metric_key (string)"
+    description: "Makes the robot follow a person using sensors and PID control."
+    ports:
+      - name: "cmd_vel_topic"
+        direction: "Input"
+        type: "string"
+        description: "Velocity command topic."
+      - name: "sonar_topic"
+        direction: "Input"
+        type: "string"
+        description: "Sonar sensor topic."
+      - name: "touch_topic"
+        direction: "Input"
+        type: "string"
+        description: "Touch sensor topic."
+    return:
+      SUCCESS: "Only if succeed_on_reach input is true and the target is within minimum distance."
+      RUNNING: "Actively following the target or when stopped by touch sensor or obstacles."
+      FAILURE: "The target frame is lost or cannot be found via TF."
 ```
+
+**Note:** Condition nodes typically only have SUCCESS and FAILURE states. Some continuous Action nodes may only return RUNNING until halted by the behavior tree.
 
 ## RAG Mode (Retrieval-Augmented Generation)
 
