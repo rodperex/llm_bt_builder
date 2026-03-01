@@ -42,3 +42,5 @@ IMPORTANTE: Nota cómo en el ejemplo se omiten puertos como 'timeout' o 'service
 {user_objective}
 
 Responde ÚNICAMENTE con el código XML generado. No añadas explicaciones ni markdown.
+
+IMPORTANTE: Tu respuesta TIENE que empezar con <root> y terminar con </root>. No incluyas texto conversacional.

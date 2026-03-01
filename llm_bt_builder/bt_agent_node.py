@@ -6,6 +6,7 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 import os
+import time
 from ament_index_python.packages import get_package_share_directory
 from llm_bt_builder.srv import GenerateBT
 
@@ -56,7 +57,7 @@ class BTAgentNode(Node):
         if self.mode == 'local': pass 
 
         self.srv = self.create_service(GenerateBT, 'generate_bt', self.generate_bt_callback)
-        self.get_logger().info("🤖 LLM Agent Node ready (2-phase validation).")
+        self.get_logger().info(f"🤖 LLM Agent Node ready ({self.model_id}).")
 
     def load_prompt_template(self):
         try:
@@ -111,7 +112,11 @@ class BTAgentNode(Node):
             self.get_logger().info(f"🧠 Attempt {attempt + 1}/{MAX_RETRIES}...")
             
             raw_reply = self.call_llm(messages)
-            if not raw_reply: continue
+            # if not raw_reply: continue
+            if not raw_reply: 
+                self.get_logger().warn("⚠️ Fallo en llamada LLM. Esperando 5 segundos...")
+                time.sleep(5.0)
+                continue
             
             xml_str = self.extract_xml(raw_reply)
             

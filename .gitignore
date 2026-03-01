@@ -1,3 +1,5 @@
 config/*.yaml
 prompts/*.bak
 xml/*.xml
+objectives/*.txt
+!objectives/example_sp.txt

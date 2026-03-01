@@ -18,11 +18,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 install(PROGRAMS
   llm_bt_builder/bt_agent_node.py
   llm_bt_builder/bt_client_node.py
+  llm_bt_builder/bt_rag_agent_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # 3. Instalar otros directorios
-install(DIRECTORY config prompts launch
+install(DIRECTORY config prompts launch objectives
   DESTINATION share/${PROJECT_NAME}
 )
 
