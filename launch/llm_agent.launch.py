@@ -7,14 +7,22 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
 
+    provider_arg = DeclareLaunchArgument(
+        'provider',
+        default_value='gemini',
+        # Options: 'gemini', 'openai', 'anthropic', 'ollama'
+        description='LLM Provider: gemini, openai, anthropic, or ollama'
+    )
+
     model_arg = DeclareLaunchArgument(
         'model',
         # default_value='gemini-2.5-flash',
-        # default_value='gemini-2.0-flash-lite',
+        # default_value='gpt-4o',
+        default_value='gemini-2.0-flash-lite',
         # default_value='llama3.1', # ollama (powerful GPU required)
         # default_value='qwen2.5-coder:7b', # ollama (powerful GPU required)
         # default_value ='deepseek-r1:8b', # ollama
-        default_value='qwen2.5-coder:3b',
+        # default_value='qwen2.5-coder:3b',
         description='Model ID to use (e.g., gemini-2.5-flash, llama3.1, qwen2.5-coder:1.5b)'
     )
 
@@ -26,15 +34,18 @@ def generate_launch_description():
 
     url_arg = DeclareLaunchArgument(
         'url',
-        # default_value='https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-        default_value='http://localhost:11434/v1/chat/completions',
-        description='API endpoint (e.g., http://localhost:11434/v1/chat/completions)'
+        # default_value='https://api.openai.com/v1/chat/completions',
+        default_value='https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        # default_value='https://api.openai.com/v1/chat/completions',
+        # default_value='https://api.anthropic.com/v1/messages',
+        # Ollama: http://localhost:11434/v1/chat/completions
+        description='API endpoint (optional, auto-detected per provider if empty)'
     )
 
     key_arg = DeclareLaunchArgument(
         'key',
-        default_value=EnvironmentVariable('GEMINI_API_KEY', default_value=''),
-        description='API Key (optional if already set in environment variables)'
+        default_value='',
+        description='API Key (optional, will auto-detect based on provider from env vars)'
     )
 
     agent_type_arg = DeclareLaunchArgument(
@@ -57,6 +68,7 @@ def generate_launch_description():
         output='screen',
         emulate_tty=True,
         parameters=[{
+            'llm_provider': LaunchConfiguration('provider'),
             'model_id': LaunchConfiguration('model'),
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
@@ -76,6 +88,7 @@ def generate_launch_description():
         output='screen',
         emulate_tty=True,
         parameters=[{
+            'llm_provider': LaunchConfiguration('provider'),
             'model_id': LaunchConfiguration('model'),
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
@@ -88,6 +101,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        provider_arg,
         model_arg,
         mode_arg,
         url_arg,

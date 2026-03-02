@@ -6,20 +6,21 @@ from llm_bt_builder.srv import GenerateBT
 import yaml
 import re
 import os
-import time  # NEW: For waits between retries
+import time
 import xml.etree.ElementTree as ET
 
 # --- LANGCHAIN & RAG IMPORTS ---
 try:
-    # NEW: Added AIMessage for chat history
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage 
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_ollama import ChatOllama
+    from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
     from langchain_core.documents import Document
     from langchain_chroma import Chroma
     from langchain_huggingface import HuggingFaceEmbeddings
 except ImportError as e:
-    print("❌ ERROR: Missing libraries. Run: pip install langchain-chroma langchain-huggingface sentence-transformers chromadb")
+    print("❌ ERROR: Missing libraries. Please install requirements.txt and ensure all dependencies are met.")
     raise e
 
 class RagBTAgent(Node):
@@ -28,14 +29,38 @@ class RagBTAgent(Node):
         self.get_logger().info(f"🛠️ Starting RAG Node...")
 
         # 1. PARAMETERS
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama
         self.declare_parameter('model_id', 'gemini-2.0-flash-lite')
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
         self.declare_parameter('prompt_file', 'system_prompt.txt')
 
+        self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.model_id = self.get_parameter('model_id').value
         self.api_url = self.get_parameter('api_url').value
         self.api_key = self.get_parameter('api_key').value
+
+        # API key detection based on provider
+        param_key = self.get_parameter('api_key').value
+        if param_key and param_key != "sk-no-key-needed":
+            self.api_key = param_key
+        else:
+            # Map provider to environment variable
+            provider_to_env = {
+                'gemini': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+                'openai': ['OPENAI_API_KEY'],
+                'anthropic': ['ANTHROPIC_API_KEY'],
+                'deepseek': ['DEEPSEEK_API_KEY'],
+                'ollama': ['LLM_API_KEY']
+            }
+            
+            env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
+            for env_var in env_vars:
+                self.api_key = os.getenv(env_var, '')
+                if self.api_key:
+                    break
+            if not self.api_key:
+                self.api_key = 'sk-no-key-needed'
 
         # 2. SETUP
         self.llm = self.setup_llm()
@@ -43,35 +68,66 @@ class RagBTAgent(Node):
 
         # 3. SERVICE
         self.srv = self.create_service(GenerateBT, 'generate_bt', self.generate_bt_callback)
-        self.get_logger().info(f"✅ RAG Agent ready. Model: {self.model_id}")
+        self.get_logger().info(f"✅ RAG Agent ready. Provider: {self.llm_provider}, Model: {self.model_id}")
 
     def setup_llm(self):
         TIMEOUT = 120 
         try:
-            if 'gemini' in self.model_id.lower():
+            # Use explicit provider parameter
+            if self.llm_provider == 'gemini':
                 self.get_logger().info("🔵 Configuring Gemini...")
-                # return ChatGoogleGenerativeAI(
-                #     model=self.model_id,
-                #     google_api_key=self.api_key,
-                #     temperature=0.1,
-                #     max_retries=2,
-                #     client_options={"timeout": TIMEOUT}
-                # )
                 return ChatGoogleGenerativeAI(
-                        model=self.model_id,
-                        google_api_key=self.api_key,
-                        temperature=0.1,
-                        max_retries=2
-                    )
-            else: # Fallback to Ollama for other models
+                    model=self.model_id,
+                    google_api_key=self.api_key,
+                    temperature=0.1,
+                    max_retries=2
+                )
+            elif self.llm_provider == 'anthropic':
+                self.get_logger().info("🟣 Configuring Anthropic...")
+                return ChatAnthropic(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
+            elif self.llm_provider == 'openai':
+                self.get_logger().info("🟢 Configuring OpenAI...")
+                # LangChain needs base_url without '/chat/completions'
+                base_url = None
+                if self.api_url and self.api_url != '':
+                    # Remove /chat/completions if present (for LangChain compatibility)
+                    base_url = self.api_url.replace('/chat/completions', '').rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        base_url = base_url + '/v1'
+                
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
+            elif self.llm_provider == 'ollama':
                 self.get_logger().info(f"🦙 Configuring Ollama ({self.model_id})...")
-                clean_url = self.api_url.split('/v1')[0] if self.api_url else "http://localhost:11434"
+                # Clean URL for Ollama - remove /v1/chat/completions if present
+                if self.api_url and self.api_url != '':
+                    clean_url = self.api_url.replace('/v1/chat/completions', '').replace('/v1', '').rstrip('/')
+                else:
+                    clean_url = "http://localhost:11434"
+                
                 return ChatOllama(
                     model=self.model_id,
                     base_url=clean_url,
                     temperature=0.1,
                     timeout=TIMEOUT
                 )
+            else:
+                self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
+                return None
         except Exception as e:
             self.get_logger().error(f"❌ Error setting up LLM: {e}")
             return None

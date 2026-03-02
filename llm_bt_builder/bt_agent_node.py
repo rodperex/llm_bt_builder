@@ -15,6 +15,7 @@ class BTAgentNode(Node):
         super().__init__('llm_bt_agent')
 
         # === CONFIGURATION ===
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama
         self.declare_parameter('execution_mode', 'api') 
         self.declare_parameter('model_id', 'gemini-2.5-flash')
         self.declare_parameter('model_cache_dir', './llm_models')
@@ -23,22 +24,33 @@ class BTAgentNode(Node):
         self.declare_parameter('prompt_file', 'system_prompt.txt')
         
         # Load parameters
+        self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.mode = self.get_parameter('execution_mode').value
         self.model_id = self.get_parameter('model_id').value
         self.cache_dir = os.path.abspath(self.get_parameter('model_cache_dir').value)
         self.api_url = self.get_parameter('api_url').value
         
-        # Smart API KEY management
+        # Smart API KEY management based on provider
         param_key = self.get_parameter('api_key').value
         if param_key and param_key != "sk-no-key-needed":
             self.api_key = param_key
         else:
-            # Automatic detection according to provider
-            url_lower = self.api_url.lower()
-            if 'googleapis' in url_lower: self.api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY', '')
-            elif 'openai' in url_lower: self.api_key = os.getenv('OPENAI_API_KEY', '')
-            elif 'deepseek' in url_lower: self.api_key = os.getenv('DEEPSEEK_API_KEY', '')
-            else: self.api_key = os.getenv('LLM_API_KEY', 'sk-no-key-needed')
+            # Map provider to environment variable
+            provider_to_env = {
+                'gemini': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+                'openai': ['OPENAI_API_KEY'],
+                'anthropic': ['ANTHROPIC_API_KEY'],
+                'deepseek': ['DEEPSEEK_API_KEY'],
+                'ollama': ['LLM_API_KEY']
+            }
+            
+            env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
+            for env_var in env_vars:
+                self.api_key = os.getenv(env_var, '')
+                if self.api_key:
+                    break
+            if not self.api_key:
+                self.api_key = 'sk-no-key-needed'
 
         if self.mode == 'api' and not self.api_key and 'localhost' not in self.api_url:
             self.get_logger().error("❌ FATAL ERROR: No API Key found.")
@@ -58,7 +70,7 @@ class BTAgentNode(Node):
         if self.mode == 'local': pass 
 
         self.srv = self.create_service(GenerateBT, 'generate_bt', self.generate_bt_callback)
-        self.get_logger().info(f"🤖 LLM Agent Node ready ({self.model_id}).")
+        self.get_logger().info(f"🤖 LLM Agent Node ready. Provider: {self.llm_provider}, Model: {self.model_id}")
 
     def load_prompt_template(self):
         try:
@@ -199,7 +211,7 @@ class BTAgentNode(Node):
                 # =========================================================
                 # BRANCH 1: GOOGLE GEMINI (NATIVE API)
                 # =========================================================
-                if 'googleapis' in self.api_url:
+                if self.llm_provider == 'gemini':
                     # Build the native URL ignoring the OpenAI endpoint
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent?key={self.api_key}"
                     
@@ -234,37 +246,72 @@ class BTAgentNode(Node):
                         return None
                     
                 # =========================================================
-                # BRANCH 2: STANDARD OLLAMA / OPENAI
+                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / OLLAMA
                 # =========================================================
-                else:
+                elif self.llm_provider in ['openai', 'anthropic', 'ollama']:
                     headers = {
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self.api_key}"
                     }
                     
-                    # Ollama and OpenAI usually accept the 'system' role directly,
-                    # so we pass the messages as is (or filter if needed).
+                    # Anthropic uses a different header for API key
+                    if self.llm_provider == 'anthropic':
+                        headers = {
+                            "Content-Type": "application/json",
+                            "x-api-key": self.api_key,
+                            "anthropic-version": "2023-06-01"
+                        }
+                    
+                    # Standard payload for OpenAI-compatible APIs
                     payload = {
                         "model": self.model_id,
-                        "messages": messages, # Pasamos la lista original
+                        "messages": messages,
                         "temperature": 0.1
                     }
                     
-                    # Request to the standard endpoint (e.g. localhost:11434/v1/chat/completions)
-                    resp = requests.post(self.api_url, headers=headers, json=payload, timeout=TIMEOUT_SEC)
+                    # Add max_tokens for Anthropic
+                    if self.llm_provider == 'anthropic':
+                        payload["max_tokens"] = 4096
+                    
+                    # Determine the correct endpoint
+                    if self.api_url and self.api_url != '':
+                        endpoint = self.api_url
+                    else:
+                        # Default endpoints
+                        if self.llm_provider == 'openai':
+                            endpoint = 'https://api.openai.com/v1/chat/completions'
+                        elif self.llm_provider == 'anthropic':
+                            endpoint = 'https://api.anthropic.com/v1/messages'
+                        else:  # ollama
+                            endpoint = 'http://localhost:11434/v1/chat/completions'
+                    
+                    resp = requests.post(endpoint, headers=headers, json=payload, timeout=TIMEOUT_SEC)
                     
                     if resp.status_code != 200:
-                        self.get_logger().error(f"❌ Standard API Error (HTTP {resp.status_code}): {resp.text}")
+                        self.get_logger().error(f"❌ {self.llm_provider.upper()} API Error (HTTP {resp.status_code}): {resp.text}")
                         return None
                         
                     data = resp.json()
                     
-                    # Extracción estándar (choices -> message -> content)
-                    if 'choices' in data and len(data['choices']) > 0:
-                        return data['choices'][0]['message']['content']
+                    # Extract response based on provider format
+                    if self.llm_provider == 'anthropic':
+                        # Anthropic format: content -> [0] -> text
+                        if 'content' in data and len(data['content']) > 0:
+                            return data['content'][0]['text']
+                        else:
+                            self.get_logger().error(f"❌ Unexpected Anthropic response: {data}")
+                            return None
                     else:
-                        self.get_logger().error(f"❌ Unexpected or empty response: {data}")
-                        return None
+                        # Standard OpenAI format: choices -> message -> content
+                        if 'choices' in data and len(data['choices']) > 0:
+                            return data['choices'][0]['message']['content']
+                        else:
+                            self.get_logger().error(f"❌ Unexpected or empty response: {data}")
+                            return None
+                
+                else:
+                    self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
+                    return None
 
             except requests.exceptions.ConnectionError:
                 self.get_logger().error(f"❌ Connection error. Is the server running? URL: {self.api_url}")

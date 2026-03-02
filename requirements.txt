@@ -5,11 +5,13 @@ requests>=2.28.0
 ament-index-python
 
 # --- LangChain & RAG dependencies ---
-langchain-core
+langchain-core<1.0.0,>=0.3.70
 langchain-chroma
 langchain-huggingface
 langchain-google-genai
 langchain-ollama
+langchain-anthropic<1.0.0
+langchain-openai<1.0.0
 chromadb
 sentence-transformers
 
