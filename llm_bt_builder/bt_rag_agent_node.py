@@ -62,11 +62,37 @@ class RagBTAgent(Node):
             if not self.api_key:
                 self.api_key = 'sk-no-key-needed'
 
-        # 2. SETUP
+        # 2. BT.CPP Node Categories (for validation)
+        self.decorators = [
+            'Inverter', 'ForceSuccess', 'ForceFailure', 
+            'RetryUntilSuccessful', 'KeepRunningUntilFailure',
+            'Repeat', 'Timeout', 'Delay'
+        ]
+        
+        self.control_nodes = [
+            'Sequence', 'Fallback', 'ReactiveSequence', 'ReactiveFallback',
+            'Parallel', 'ParallelAll', 'ParallelOne', 'Switch', 'WhileDoElse',
+            'RepeatUntilFailure', 'RepeatUntilSuccess', 'PipelineSequence'
+        ]
+        # self.control_nodes = [
+        #     'Sequence', 'SequenceWithMemory', 'ReactiveSequence', 
+        #     'Fallback', 'ReactiveFallback',
+        #     'Parallel', 'ParallelAll', 'ParallelOne', 
+        #     'IfThenElse', 'WhileDoElse', 'Switch',
+        #     'RepeatUntilFailure', 'RepeatUntilSuccess', 'RetryNode',
+        #     'PipelineSequence', 'RecoveryNode'
+        # ]
+        
+        self.structural_nodes = set(
+            self.decorators + self.control_nodes + 
+            ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+        )
+
+        # 3. SETUP
         self.llm = self.setup_llm()
         self.embeddings = self.setup_embeddings()
 
-        # 3. SERVICE
+        # 4. SERVICE
         self.srv = self.create_service(GenerateBT, 'generate_bt', self.generate_bt_callback)
         self.get_logger().info(f"✅ RAG Agent ready. Provider: {self.llm_provider}, Model: {self.model_id}")
 
@@ -94,13 +120,34 @@ class RagBTAgent(Node):
                 )
             elif self.llm_provider == 'openai':
                 self.get_logger().info("🟢 Configuring OpenAI...")
-                # LangChain needs base_url without '/chat/completions'
+                # LangChain needs base_url with /v1
                 base_url = None
                 if self.api_url and self.api_url != '':
-                    # Remove /chat/completions if present (for LangChain compatibility)
-                    base_url = self.api_url.replace('/chat/completions', '').rstrip('/')
+                    base_url = self.api_url.rstrip('/')
                     if not base_url.endswith('/v1'):
                         base_url = base_url + '/v1'
+                else:
+                    base_url = 'https://api.openai.com/v1'
+                
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
+            elif self.llm_provider == 'deepseek':
+                self.get_logger().info(f"🔷 Configuring DeepSeek ({self.model_id})...")
+                # DeepSeek uses OpenAI-compatible API
+                base_url = None
+                if self.api_url and self.api_url != '':
+                    base_url = self.api_url.rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        base_url = base_url + '/v1'
+                else:
+                    base_url = "https://api.deepseek.com/v1"
                 
                 return ChatOpenAI(
                     model=self.model_id,
@@ -113,15 +160,15 @@ class RagBTAgent(Node):
                 )
             elif self.llm_provider == 'ollama':
                 self.get_logger().info(f"🦙 Configuring Ollama ({self.model_id})...")
-                # Clean URL for Ollama - remove /v1/chat/completions if present
+                # Ollama base URL (without /v1)
                 if self.api_url and self.api_url != '':
-                    clean_url = self.api_url.replace('/v1/chat/completions', '').replace('/v1', '').rstrip('/')
+                    base_url = self.api_url.rstrip('/')
                 else:
-                    clean_url = "http://localhost:11434"
+                    base_url = "http://localhost:11434"
                 
                 return ChatOllama(
                     model=self.model_id,
-                    base_url=clean_url,
+                    base_url=base_url,
                     temperature=0.1,
                     timeout=TIMEOUT
                 )
@@ -251,7 +298,16 @@ class RagBTAgent(Node):
                     time.sleep(5)
                     continue
 
-                # B. Semantic Validation
+                # B. BehaviorTree Structure Validation
+                is_valid_structure, struct_msg = self.validate_xml_bt(xml_str)
+                if not is_valid_structure:
+                    self.get_logger().warn(f"⚠️ BT Structure Error: {struct_msg}")
+                    messages.append(AIMessage(content=ai_msg.content))
+                    messages.append(HumanMessage(content=f"ERROR: BehaviorTree structure invalid: {struct_msg}. Fix the tree structure."))
+                    time.sleep(1)
+                    continue
+
+                # C. Semantic Validation
                 is_valid_bt, bt_msg = self.validate_bt_semantics(xml_str, full_node_specs)
                 if not is_valid_bt:
                     self.get_logger().warn(f"⚠️ BT Semantic Error: {bt_msg}")
@@ -297,25 +353,65 @@ class RagBTAgent(Node):
         except ET.ParseError as e:
             return False, str(e)
 
-    def validate_bt_semantics(self, xml_string, node_specs):
-        # Check that the used nodes exist in the original YAML and that the ports are correct
+    def validate_xml_bt(self, xml_string):
+        """Validate BehaviorTree structural rules (decorators have 1 child, control nodes have children, etc.)"""
         try:
             root = ET.fromstring(xml_string)
-            control_nodes = [
-                'Sequence', 'Fallback', 'ReactiveSequence', 'ReactiveFallback',
-                'RetryUntilSuccessful', 'Inverter', 'ForceSuccess', 'ForceFailure',
-                'KeepRunningUntilFailure', 'BehaviorTree', 'root', 'AlwaysSuccess', 'AlwaysFailure',
-                'Parallel', 'Delay'
-            ]
+            
             for elem in root.iter():
-                if elem.tag in control_nodes: continue
+                children = list(elem)
+                
+                # Skip text/comments
+                if not isinstance(elem.tag, str):
+                    continue
+                
+                # Root and BehaviorTree should have exactly 1 child
+                if elem.tag in ['root', 'BehaviorTree']:
+                    if len(children) != 1:
+                        return False, f"<{elem.tag}> must have exactly 1 child, found {len(children)}"
+                
+                # Decorators must have exactly 1 child
+                elif elem.tag in self.decorators:
+                    if len(children) != 1:
+                        return False, f"Decorator <{elem.tag}> must have exactly 1 child, found {len(children)}"
+                
+                # Control nodes must have at least 1 child
+                elif elem.tag in self.control_nodes:
+                    if len(children) < 1:
+                        return False, f"Control node <{elem.tag}> must have at least 1 child, found {len(children)}"
+                
+                # AlwaysSuccess/AlwaysFailure should have 0 children
+                elif elem.tag in ['AlwaysSuccess', 'AlwaysFailure']:
+                    if len(children) > 0:
+                        return False, f"<{elem.tag}> should not have children, found {len(children)}"
+            
+            return True, "OK"
+        except Exception as e:
+            return False, str(e)
+
+    def validate_bt_semantics(self, xml_string, node_specs):
+        # Check that custom nodes exist in YAML and ports are correct
+        # Note: Structural validation is done in validate_xml_bt
+        try:
+            root = ET.fromstring(xml_string)
+            
+            for elem in root.iter():
+                # Skip structural BT.CPP nodes (using set for O(1) lookup)
+                if elem.tag in self.structural_nodes:
+                    continue
+                    
+                # Validate custom/action nodes from YAML
                 if elem.tag not in node_specs:
                     return False, f"Node <{elem.tag}> does NOT exist in the capabilities YAML."
+                
+                # Validate ports/attributes
                 allowed_ports = node_specs[elem.tag]
                 for attr in elem.attrib:
-                    if attr in ['name', 'ID']: continue
+                    if attr in ['name', 'ID']:  # Structural attributes
+                        continue
                     if attr not in allowed_ports:
                         return False, f"Node <{elem.tag}> has an illegal port: '{attr}'. Allowed: {allowed_ports}"
+            
             return True, "OK"
         except Exception as e:
             return False, str(e)

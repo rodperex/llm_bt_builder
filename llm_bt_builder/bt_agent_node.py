@@ -56,15 +56,25 @@ class BTAgentNode(Node):
             self.get_logger().error("❌ FATAL ERROR: No API Key found.")
             raise ValueError("API Key missing.")
         
-        # Standard BT.CPP control nodes always allowed
+        # BT.CPP Node Categories (for validation)
+        self.decorators = [
+            'Inverter', 'ForceSuccess', 'ForceFailure', 
+            'RetryUntilSuccessful', 'KeepRunningUntilFailure',
+            'Repeat', 'Timeout', 'Delay'
+        ]
+        
         self.control_nodes = [
             'Sequence', 'Fallback', 'ReactiveSequence', 'ReactiveFallback',
-            'Inverter', 'RetryUntilSuccessful', 'ForceSuccess', 'ForceFailure',
             'Parallel', 'ParallelAll', 'ParallelOne', 'Switch', 'WhileDoElse',
-            'Repeat', 'RepeatUntilFailure', 'RepeatUntilSuccess', 'SubTree', 
-            'Timeout', 'Delay', 'PipelineSequence', 'IfThenElse', 'Blackboard', 
-            'SetBlackboard', 'Wait', 'AlwaysSuccess', 'AlwaysFailure'
+            'Repeat', 'RepeatUntilFailure', 'RepeatUntilSuccess', 'SubTree',
+            'PipelineSequence', 'IfThenElse'
         ]
+        
+        self.structural_nodes = set(
+            self.decorators + self.control_nodes + 
+            ['root', 'BehaviorTree', 'Blackboard', 'SetBlackboard', 'Wait',
+             'AlwaysSuccess', 'AlwaysFailure']
+        )
 
         # Local initialization (Omitted for brevity, same as before)
         if self.mode == 'local': pass 
@@ -152,7 +162,16 @@ class BTAgentNode(Node):
                 messages.append({"role": "user", "content": f"XML SYNTAX ERROR: {xml_result}. Please fix the tags."})
                 continue 
 
-            # === PHASE 2: SEMANTIC VALIDATION ===
+            # === PHASE 2: BEHAVORTREE STRUCTURE VALIDATION ===
+            is_structure_valid, structure_msg = self.validate_xml_bt(xml_result)
+            
+            if not is_structure_valid:
+                self.get_logger().warn(f"⚠️ BT Structure Error: {structure_msg}")
+                messages.append({"role": "assistant", "content": xml_str})
+                messages.append({"role": "user", "content": f"BEHAVORTREE STRUCTURE ERROR: {structure_msg}. Fix the tree structure."})
+                continue
+
+            # === PHASE 3: SEMANTIC VALIDATION ===
             is_bt_valid, semantic_msg = self.validate_bt_semantics(xml_result, node_specs)
 
             if is_bt_valid:
@@ -179,17 +198,53 @@ class BTAgentNode(Node):
         except ET.ParseError as e:
             return False, str(e)
 
+    def validate_xml_bt(self, root):
+        """Step 2: Validate BehaviorTree structural rules (decorators have 1 child, control nodes have children, etc.)"""
+        try:
+            for elem in root.iter():
+                children = list(elem)
+                
+                # Skip text/comments
+                if not isinstance(elem.tag, str):
+                    continue
+                
+                # Root and BehaviorTree should have exactly 1 child
+                if elem.tag in ['root', 'BehaviorTree']:
+                    if len(children) != 1:
+                        return False, f"<{elem.tag}> must have exactly 1 child, found {len(children)}"
+                
+                # Decorators must have exactly 1 child
+                elif elem.tag in self.decorators:
+                    if len(children) != 1:
+                        return False, f"Decorator <{elem.tag}> must have exactly 1 child, found {len(children)}"
+                
+                # Control nodes must have at least 1 child
+                elif elem.tag in self.control_nodes:
+                    if len(children) < 1:
+                        return False, f"Control node <{elem.tag}> must have at least 1 child, found {len(children)}"
+                
+                # AlwaysSuccess/AlwaysFailure should have 0 children
+                elif elem.tag in ['AlwaysSuccess', 'AlwaysFailure']:
+                    if len(children) > 0:
+                        return False, f"<{elem.tag}> should not have children, found {len(children)}"
+            
+            return True, "OK"
+        except Exception as e:
+            return False, str(e)
+
     def validate_bt_semantics(self, root, node_specs):
-        """Step 2: Check if nodes and attributes exist in the dictionary."""
+        """Step 3: Check if custom nodes exist in YAML and ports are correct."""
+        # Note: Structural validation is done in validate_xml_bt
+        
         # Structural attributes allowed in any node
         ignored_attrs = ['ID', 'name', 'num_attempts', 'server_name', 'server_timeout', 'path', '_success', '_failure'] 
 
         for elem in root.iter():
-            # Ignore standard control nodes
-            if elem.tag in ['root', 'BehaviorTree'] + self.control_nodes:
+            # Skip structural BT.CPP nodes (using set for O(1) lookup)
+            if elem.tag in self.structural_nodes:
                 continue
             
-            # 1. Node name check
+            # 1. Node name check - must exist in YAML capabilities
             if elem.tag not in node_specs:
                 return False, f"Node NOT allowed: <{elem.tag}>. Not in your skill list."
             
@@ -212,8 +267,10 @@ class BTAgentNode(Node):
                 # BRANCH 1: GOOGLE GEMINI (NATIVE API)
                 # =========================================================
                 if self.llm_provider == 'gemini':
-                    # Build the native URL ignoring the OpenAI endpoint
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent?key={self.api_key}"
+                    # Build the complete URL from base URL or default
+                    base_url = self.api_url if self.api_url and self.api_url != '' else 'https://generativelanguage.googleapis.com'
+                    base_url = base_url.rstrip('/')
+                    url = f"{base_url}/v1beta/models/{self.model_id}:generateContent?key={self.api_key}"
                     
                     contents = []
                     for msg in messages:
@@ -246,9 +303,9 @@ class BTAgentNode(Node):
                         return None
                     
                 # =========================================================
-                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / OLLAMA
+                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / DEEPSEEK / OLLAMA
                 # =========================================================
-                elif self.llm_provider in ['openai', 'anthropic', 'ollama']:
+                elif self.llm_provider in ['openai', 'anthropic', 'deepseek', 'ollama']:
                     headers = {
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self.api_key}"
@@ -273,17 +330,25 @@ class BTAgentNode(Node):
                     if self.llm_provider == 'anthropic':
                         payload["max_tokens"] = 4096
                     
-                    # Determine the correct endpoint
+                    # Determine base URL from parameter or defaults
                     if self.api_url and self.api_url != '':
-                        endpoint = self.api_url
+                        base_url = self.api_url.rstrip('/')
                     else:
-                        # Default endpoints
+                        # Default base URLs per provider
                         if self.llm_provider == 'openai':
-                            endpoint = 'https://api.openai.com/v1/chat/completions'
+                            base_url = 'https://api.openai.com'
                         elif self.llm_provider == 'anthropic':
-                            endpoint = 'https://api.anthropic.com/v1/messages'
+                            base_url = 'https://api.anthropic.com'
+                        elif self.llm_provider == 'deepseek':
+                            base_url = 'https://api.deepseek.com'
                         else:  # ollama
-                            endpoint = 'http://localhost:11434/v1/chat/completions'
+                            base_url = 'http://localhost:11434'
+                    
+                    # Build complete endpoint based on provider
+                    if self.llm_provider == 'anthropic':
+                        endpoint = f"{base_url}/v1/messages"
+                    else:  # openai, deepseek, ollama
+                        endpoint = f"{base_url}/v1/chat/completions"
                     
                     resp = requests.post(endpoint, headers=headers, json=payload, timeout=TIMEOUT_SEC)
                     
