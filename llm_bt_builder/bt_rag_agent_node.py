@@ -29,7 +29,7 @@ class RagBTAgent(Node):
         self.get_logger().info(f"🛠️ Starting RAG Node...")
 
         # 1. PARAMETERS
-        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek
         self.declare_parameter('model_id', 'gemini-2.0-flash-lite')
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
@@ -252,7 +252,7 @@ class RagBTAgent(Node):
         except: return {}
 
     def generate_bt_callback(self, request, response):
-        K = 15
+        K = 10
         MAX_RETRIES = 25
 
         self.get_logger().info(f"🧠 Objective: '{request.objective}'")

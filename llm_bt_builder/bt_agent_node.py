@@ -15,7 +15,7 @@ class BTAgentNode(Node):
         super().__init__('llm_bt_agent')
 
         # === CONFIGURATION ===
-        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek
         self.declare_parameter('execution_mode', 'api') 
         self.declare_parameter('model_id', 'gemini-2.5-flash')
         self.declare_parameter('model_cache_dir', './llm_models')
