@@ -1,0 +1,91 @@
+  bt_nodes:
+  - name: "Inverter"
+    type: "Decorator"
+    description: "Negates the result of the child (Success <-> Failure). RUNNING is forwarded unchanged."
+    ports: []
+    return:
+      SUCCESS: "Child failed."
+      FAILURE: "Child succeeded."
+      RUNNING: "Child is running."
+
+  - name: "RetryUntilSuccessful"
+    type: "Decorator"
+    description: "Retries the child up to N times if it returns FAILURE."
+    ports:
+      - name: "num_attempts"
+        direction: "Input"
+        type: "int"
+        description: "Max retries."
+    return:
+      SUCCESS: "Child succeeded."
+      RUNNING: "Child is running."
+      FAILURE: "Exhausted all retries without success."
+
+  - name: "Repeat"
+    type: "Decorator"
+    description: "Repeats the child up to N times if it returns SUCCESS."
+    ports:
+      - name: "num_cycles"
+        direction: "Input"
+        type: "int"
+        description: "Max repetitions (-1 for infinite)."
+    return:
+      SUCCESS: "Completed all cycles."
+      RUNNING: "Child is running or cycles not completed yet."
+      FAILURE: "Child failed during a cycle."
+
+  - name: "Timeout"
+    type: "Decorator"
+    description: "Fails if the child stays in RUNNING longer than the timeout."
+    ports:
+      - name: "msec"
+        direction: "Input"
+        type: "int"
+        description: "Timeout duration in milliseconds."
+    return:
+      SUCCESS: "Child succeeded within timeout."
+      RUNNING: "Child is running, timer active."
+      FAILURE: "Child timed out or child failed."
+
+  - name: "Delay"
+    type: "Decorator"
+    description: "Waits before ticking the child."
+    ports:
+      - name: "delay_msec"
+        direction: "Input"
+        type: "int"
+        description: "Wait time in ms."
+    return:
+      SUCCESS: "Delay completed and child succeeded."
+      RUNNING: "Currently waiting or child is running."
+      FAILURE: "Delay completed and child failed."
+
+  - name: "ForceSuccess"
+    type: "Decorator"
+    description: "Returns SUCCESS even if the child fails."
+    ports: []
+    return:
+      SUCCESS: "Child finished (Success or Failure)."
+
+  - name: "ForceFailure"
+    type: "Decorator"
+    description: "Returns FAILURE even if the child succeeds."
+    ports: []
+    return:
+      FAILURE: "Child finished (Success or Failure)."
+
+  - name: "KeepRunningUntilFailure"
+    type: "Decorator"
+    description: "Ignores SUCCESS and keeps ticking until FAILURE occurs."
+    ports: []
+    return:
+      RUNNING: "Child is SUCCESS or RUNNING."
+      FAILURE: "Child is FAILURE."
+
+  - name: "RunOnce"
+    type: "Decorator"
+    description: "Ensures the child is ticked only once and never again for the life of the tree."
+    ports: []
+    return:
+      SUCCESS: "Child succeeded once."
+      FAILURE: "Child failed once."

@@ -1,0 +1,92 @@
+bt_nodes:
+  - name: "Sequence"
+    type: "Control"
+    description: "Ticks children sequentially; returns FAILURE if any child fails, or RUNNING if a child is running."
+    ports: []
+    return:
+      SUCCESS: "All children succeeded."
+      RUNNING: "A child is currently executing."
+      FAILURE: "A child failed; execution stops."
+
+  - name: "SequenceWithMemory"
+    type: "Control"
+    description: "Sequence that remembers which child was running and resumes from there on the next tick."
+    ports: []
+    return:
+      SUCCESS: "All children succeeded."
+      RUNNING: "A child is currently executing."
+      FAILURE: "A child failed."
+
+  - name: "Fallback"
+    type: "Control"
+    description: "Ticks children until one succeeds. If all fail, the node fails."
+    ports: []
+    return:
+      SUCCESS: "One child succeeded."
+      RUNNING: "A child is currently executing."
+      FAILURE: "All children failed."
+
+  - name: "ReactiveSequence"
+    type: "Control"
+    description: "Ticks all children every time. If a previous child (condition) changes from SUCCESS to FAILURE, it halts the current running child."
+    ports: []
+    return:
+      SUCCESS: "All children succeeded."
+      RUNNING: "A child is running and all preceding children are still SUCCESS."
+      FAILURE: "A child failed."
+
+  - name: "ReactiveFallback"
+    type: "Control"
+    description: "Similar to Fallback, but restarts from the first child if a previously failing child (condition) succeeds."
+    ports: []
+    return:
+      SUCCESS: "A child succeeded."
+      RUNNING: "No child succeeded yet, and at least one is RUNNING."
+      FAILURE: "All children failed."
+
+  - name: "Parallel"
+    type: "Control"
+    description: "Ticks all children concurrently. Specific behavior depends on success/failure thresholds."
+    ports:
+      - name: "success_count"
+        direction: "Input"
+        type: "int"
+        description: "Threshold of successful children to return SUCCESS."
+      - name: "failure_count"
+        direction: "Input"
+        type: "int"
+        description: "Threshold of failed children to return FAILURE."
+    return:
+      SUCCESS: "Successful children >= success_count."
+      FAILURE: "Failed children >= failure_count."
+      RUNNING: "Thresholds not yet met."
+
+  - name: "IfThenElse"
+    type: "Control"
+    description: "First child is condition, second is 'then', third is 'else'."
+    ports: []
+    return:
+      SUCCESS: "The active branch (then or else) succeeded."
+      FAILURE: "The active branch (then or else) failed."
+
+  - name: "WhileDoElse"
+    type: "Control"
+    description: "While child 1 (condition) is SUCCESS, tick child 2 (do). If child 1 is FAILURE, tick child 3 (else)."
+    ports: []
+    return:
+      SUCCESS: "The active branch (do or else) succeeded."
+      RUNNING: "The condition or active branch is running."
+      FAILURE: "The active branch (do or else) failed."
+
+  - name: "Switch"
+    type: "Control"
+    description: "Selects a child based on a value in the blackboard."
+    ports:
+      - name: "variable"
+        direction: "Input"
+        type: "string"
+        description: "Blackboard key to check."
+    return:
+      SUCCESS: "Selected child succeeded."
+      RUNNING: "Selected child is running."
+      FAILURE: "Selected child failed."

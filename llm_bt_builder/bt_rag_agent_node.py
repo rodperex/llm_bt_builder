@@ -62,30 +62,20 @@ class RagBTAgent(Node):
             if not self.api_key:
                 self.api_key = 'sk-no-key-needed'
 
-        # 2. BT.CPP Node Categories (for validation)
-        self.decorators = [
-            'Inverter', 'ForceSuccess', 'ForceFailure', 
-            'RetryUntilSuccessful', 'KeepRunningUntilFailure',
-            'Repeat', 'Timeout', 'Delay'
-        ]
+        # 2. Load BT.CPP Node Categories from YAML files
+        self.bt_control_nodes_yaml = self._load_bt_nodes_yaml('btv4_control_nodes.yaml')
+        self.bt_decorator_nodes_yaml = self._load_bt_nodes_yaml('btv4_decorator_nodes.yaml')
         
-        self.control_nodes = [
-            'Sequence', 'Fallback', 'ReactiveSequence', 'ReactiveFallback',
-            'Parallel', 'ParallelAll', 'ParallelOne', 'Switch', 'WhileDoElse',
-            'RepeatUntilFailure', 'RepeatUntilSuccess', 'PipelineSequence'
-        ]
-        # self.control_nodes = [
-        #     'Sequence', 'SequenceWithMemory', 'ReactiveSequence', 
-        #     'Fallback', 'ReactiveFallback',
-        #     'Parallel', 'ParallelAll', 'ParallelOne', 
-        #     'IfThenElse', 'WhileDoElse', 'Switch',
-        #     'RepeatUntilFailure', 'RepeatUntilSuccess', 'RetryNode',
-        #     'PipelineSequence', 'RecoveryNode'
-        # ]
+        # Extract node names dynamically
+        self.control_nodes = self._extract_node_names(self.bt_control_nodes_yaml)
+        self.decorators = self._extract_node_names(self.bt_decorator_nodes_yaml)
         
+        # Special nodes that don't require validation
+        self.special_nodes = ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+        
+        # All structural nodes (for semantic validation skip)
         self.structural_nodes = set(
-            self.decorators + self.control_nodes + 
-            ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+            self.decorators + self.control_nodes + self.special_nodes
         )
 
         # 3. SETUP
@@ -183,6 +173,36 @@ class RagBTAgent(Node):
         self.get_logger().info("📥 Loading Embeddings (HuggingFace)...")
         return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
+    def _load_bt_nodes_yaml(self, filename):
+        """Load BT.CPP standard nodes from YAML file"""
+        try:
+            pkg_path = get_package_share_directory('llm_bt_builder')
+            yaml_path = os.path.join(pkg_path, 'config', filename)
+            if not os.path.exists(yaml_path):
+                # Fallback to local development path
+                yaml_path = os.path.join(os.getcwd(), 'src', 'llm_bt_builder', 'config', filename)
+            
+            if os.path.exists(yaml_path):
+                with open(yaml_path, 'r') as f:
+                    return f.read()
+            else:
+                self.get_logger().warn(f"⚠️ Could not find {filename}")
+                return ""
+        except Exception as e:
+            self.get_logger().error(f"❌ Error loading {filename}: {e}")
+            return ""
+    
+    def _extract_node_names(self, yaml_content):
+        """Extract node names from a YAML string"""
+        try:
+            if not yaml_content:
+                return []
+            data = yaml.safe_load(yaml_content)
+            return [node['name'] for node in data.get('bt_nodes', [])]
+        except Exception as e:
+            self.get_logger().error(f"❌ Error extracting node names: {e}")
+            return []
+
     def load_prompt_template(self):
         try:
             prompt_file = self.get_parameter('prompt_file').value
@@ -260,8 +280,14 @@ class RagBTAgent(Node):
         raw_template = self.load_prompt_template()
         if not raw_template:
             response.success = False; response.message = "Prompt file missing"; return response
+        else:
+            self.get_logger().debug(f"📄 Prompt template loaded successfully: {raw_template}")
+        # Prepare BT.CPP standard nodes
+        bt_standard_nodes = "## Control Nodes\n" + self.bt_control_nodes_yaml + "\n"
+        bt_standard_nodes += "## Decorator Nodes\n" + self.bt_decorator_nodes_yaml
 
-        system_content = raw_template.replace("{robot_capabilities}", filtered_yaml_str)
+        system_content = raw_template.replace("{bt_standard_nodes}", bt_standard_nodes)
+        system_content = system_content.replace("{robot_capabilities}", filtered_yaml_str)
         system_content = system_content.replace("{user_objective}", "")
 
         # Initialize chat history

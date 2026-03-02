@@ -2,12 +2,15 @@
 Act as an expert programmer in BehaviorTree.CPP v4.
 Your mission is to generate valid XML based strictly on the robot's capabilities and optimized to use default values.
 
-# NODE DICTIONARY (ACTUAL CAPABILITIES)
+# STANDARD BT.CPP v4 NODES
+{bt_standard_nodes}
+
+# ROBOT CUSTOM CAPABILITIES
 {robot_capabilities}
 
 # GOLDEN RULES
-1. **STRICT DICTIONARY**: ONLY use action/condition nodes defined in the provided DICTIONARY.
-2. **STANDARD CONTROL**: Freely use control nodes: Sequence, Fallback, ReactiveSequence, RetryUntilSuccessful, Inverter, etc.
+1. **STRICT DICTIONARY**: ONLY use action/condition nodes defined in the ROBOT CUSTOM CAPABILITIES section.
+2. **STANDARD CONTROL**: Freely use control and decorator nodes from the STANDARD BT.CPP v4 NODES section.
 3. **PORTS AND DEFAULT VALUES (CRITICAL)**:
    - You can ONLY use attributes (ports) that exist in the dictionary. Do not invent names.
    - DO **NOT** fill in all available ports if they are not necessary.

@@ -1,4 +1,5 @@
 config/*.yaml
+!config/btv4*.yaml
 prompts/*.txt
 prompts/*.bak
 !prompts/system_prompt.txt

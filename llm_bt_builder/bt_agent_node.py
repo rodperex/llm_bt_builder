@@ -56,24 +56,21 @@ class BTAgentNode(Node):
             self.get_logger().error("❌ FATAL ERROR: No API Key found.")
             raise ValueError("API Key missing.")
         
-        # BT.CPP Node Categories (for validation)
-        self.decorators = [
-            'Inverter', 'ForceSuccess', 'ForceFailure', 
-            'RetryUntilSuccessful', 'KeepRunningUntilFailure',
-            'Repeat', 'Timeout', 'Delay'
-        ]
+        # Load BT.CPP Node Categories from YAML files
+        self.bt_control_nodes_yaml = self._load_bt_nodes_yaml('btv4_control_nodes.yaml')
+        self.bt_decorator_nodes_yaml = self._load_bt_nodes_yaml('btv4_decorator_nodes.yaml')
         
-        self.control_nodes = [
-            'Sequence', 'Fallback', 'ReactiveSequence', 'ReactiveFallback',
-            'Parallel', 'ParallelAll', 'ParallelOne', 'Switch', 'WhileDoElse',
-            'Repeat', 'RepeatUntilFailure', 'RepeatUntilSuccess', 'SubTree',
-            'PipelineSequence', 'IfThenElse'
-        ]
+        # Extract node names dynamically
+        self.control_nodes = self._extract_node_names(self.bt_control_nodes_yaml)
+        self.decorators = self._extract_node_names(self.bt_decorator_nodes_yaml)
         
+        # Special nodes that don't require validation
+        self.special_nodes = ['root', 'BehaviorTree', 'Blackboard', 'SetBlackboard', 'Wait',
+                              'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+        
+        # All structural nodes (for semantic validation skip)
         self.structural_nodes = set(
-            self.decorators + self.control_nodes + 
-            ['root', 'BehaviorTree', 'Blackboard', 'SetBlackboard', 'Wait',
-             'AlwaysSuccess', 'AlwaysFailure']
+            self.decorators + self.control_nodes + self.special_nodes
         )
 
         # Local initialization (Omitted for brevity, same as before)
@@ -90,6 +87,36 @@ class BTAgentNode(Node):
             path = os.path.join(pkg_share_dir, 'prompts', prompt_file)
             with open(path, 'r', encoding='utf-8') as f: return f.read()
         except Exception: return None
+    
+    def _load_bt_nodes_yaml(self, filename):
+        """Load BT.CPP standard nodes from YAML file"""
+        try:
+            pkg_path = get_package_share_directory('llm_bt_builder')
+            yaml_path = os.path.join(pkg_path, 'config', filename)
+            if not os.path.exists(yaml_path):
+                # Fallback to local development path
+                yaml_path = os.path.join(os.getcwd(), 'src', 'llm_bt_builder', 'config', filename)
+            
+            if os.path.exists(yaml_path):
+                with open(yaml_path, 'r') as f:
+                    return f.read()
+            else:
+                self.get_logger().warn(f"⚠️ Could not find {filename}")
+                return ""
+        except Exception as e:
+            self.get_logger().error(f"❌ Error loading {filename}: {e}")
+            return ""
+    
+    def _extract_node_names(self, yaml_content):
+        """Extract node names from a YAML string"""
+        try:
+            if not yaml_content:
+                return []
+            data = yaml.safe_load(yaml_content)
+            return [node['name'] for node in data.get('bt_nodes', [])]
+        except Exception as e:
+            self.get_logger().error(f"❌ Error extracting node names: {e}")
+            return []
 
     def generate_bt_callback(self, request, response):
         MAX_RETRIES = 25
@@ -124,8 +151,13 @@ class BTAgentNode(Node):
         template = self.load_prompt_template()
         if not template: return response
         
-        # Prepare prompt
-        prompt = template.replace("{robot_capabilities}", request.bt_nodes_yaml)\
+        # Prepare BT.CPP standard nodes
+        bt_standard_nodes = "## Control Nodes\n" + self.bt_control_nodes_yaml + "\n"
+        bt_standard_nodes += "## Decorator Nodes\n" + self.bt_decorator_nodes_yaml
+        
+        # Prepare prompt with separated sections
+        prompt = template.replace("{bt_standard_nodes}", bt_standard_nodes)\
+                         .replace("{robot_capabilities}", request.bt_nodes_yaml)\
                          .replace("{user_objective}", request.objective)
 
         messages = [
