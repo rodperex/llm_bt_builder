@@ -1,4 +1,0 @@
-Tienes que explicarle a la persona cómo es el test de velocidad de marcha, que consiste en que la persona tiene que caminar a su velocidad normal hasta que le digas que pare.
-No lo va a hacer aún solo queremos que lo entienda para después.
-Asegúrate de que ha entendido la explicación preguntándoselo explícitamente.
-Si no lo entiende, vuelve a explicárselo hasta que lo entienda.
