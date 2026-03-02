@@ -1,3 +1,5 @@
+# BehaviorTree.CPP v4 Control Nodes
+
 bt_nodes:
   - name: "Sequence"
     type: "Control"
