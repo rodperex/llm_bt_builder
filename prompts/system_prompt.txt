@@ -26,7 +26,38 @@ Your mission is to generate valid XML based strictly on the robot's capabilities
      Wire the relevant OUTPUT port of the node that produces this data to `{identifier}`.
      Example: if `outputs: [destination]`, the Listen/Extract node should have `extracted_info="{destination}"`.
    - Do NOT invent inputs or outputs that are not listed. Do NOT ignore listed ones.
-6. **STRUCTURE**: The XML must follow the BT.CPP v4 standard and be syntactically perfect.
+6. **PARALLEL SUB-ACTIONS**:
+   - The objective's `steps:` list may contain entries of two kinds:
+     * Sequential: `- step: "<action>"` — map to a node inside the enclosing Sequence.
+     * Parallel group: `- parallel:\n    - step: "<A>"\n    - step: "<B>"` — map to a
+       `<Parallel success_count="N" failure_count="1">` node where N equals the number of
+       children (i.e. all must succeed). Place the parallel group at the correct position
+       inside the Sequence, preserving the overall ordering.
+   - The sub-actions inside a `parallel:` group are causally independent; they do NOT share
+     output ports with each other. Each sub-action maps to its own node inside `<Parallel>`.
+   - Default to `<Sequence>` for everything. Only emit `<Parallel>` when the objective
+     explicitly contains a `parallel:` group.
+   - Example mapping:
+     ```
+     steps:
+       - step: "Navigate to kitchen"
+       - parallel:
+           - step: "Speak order to chef"
+           - step: "Activate display panel"
+       - step: "Wait for acknowledgement"
+     ```
+     becomes:
+     ```xml
+     <Sequence>
+       <DICTIONARY_NODE name="Navigate" target="kitchen"/>
+       <Parallel success_count="2" failure_count="1">
+         <DICTIONARY_NODE name="Speak" text="{order}"/>
+         <DICTIONARY_NODE name="ActivateDisplay"/>
+       </Parallel>
+       <DICTIONARY_NODE name="WaitAck"/>
+     </Sequence>
+     ```
+7. **STRUCTURE**: The XML must follow the BT.CPP v4 standard and be syntactically perfect.
 
 # REFERENCE EXAMPLE (DESIRED STYLE)
 
