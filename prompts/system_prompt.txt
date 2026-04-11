@@ -17,7 +17,16 @@ Your mission is to generate valid XML based strictly on the robot's capabilities
    - **OMIT** optional ports (such as `service_name`, `timeout`, `server_name`, `plugin`) if you want to use the default value configured in C++.
    - ONLY explicitly write the ports that are essential for the current logic (e.g., `text`, `target_frame`).
 4. **BLACKBOARD**: Use SINGLE braces `{}` to read/write Blackboard variables in ports (e.g., port="{my_variable}"). DO NOT use double braces `{{}}`.
-5. **STRUCTURE**: The XML must follow the BT.CPP v4 standard and be syntactically perfect.
+5. **INTER-STEP DATA FLOW (inputs / outputs)**:
+   - The objective may declare `inputs:` and/or `outputs:` lists of plain blackboard variable identifiers.
+   - `inputs`: blackboard keys written by a PREVIOUS step's BT and consumed by this step.
+     Wire the relevant INPUT port of the node that reads this data to `{identifier}`.
+     Example: if `inputs: [destination]`, the Navigate node should have `target="{destination}"`.
+   - `outputs`: blackboard keys this step must write so that a FUTURE step can read them.
+     Wire the relevant OUTPUT port of the node that produces this data to `{identifier}`.
+     Example: if `outputs: [destination]`, the Listen/Extract node should have `extracted_info="{destination}"`.
+   - Do NOT invent inputs or outputs that are not listed. Do NOT ignore listed ones.
+6. **STRUCTURE**: The XML must follow the BT.CPP v4 standard and be syntactically perfect.
 
 # REFERENCE EXAMPLE (DESIRED STYLE)
 
