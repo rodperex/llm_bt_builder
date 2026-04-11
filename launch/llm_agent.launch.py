@@ -127,7 +127,7 @@ def generate_launch_description():
     # Agentic node (tool-calling / ReAct)
     agentic_node = Node(
         package='llm_bt_builder',
-        executable='bt_agentic_node.py',
+        executable='bt_rag_agentic_node.py',
         name='llm_bt_agentic',
         output='screen',
         emulate_tty=True,

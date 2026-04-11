@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# bt_agentic_node.py
+# bt_rag_agentic_node.py
 #
 # Fully agentic BT builder: the LLM autonomously decides when to call each
 # validation tool (validate_xml_syntax → validate_bt_structure →

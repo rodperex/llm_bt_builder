@@ -6,7 +6,7 @@ Behavior Tree generator using Large Language Models (LLMs) for ROS 2 robots. Aut
 |---|---|---|
 | `normal` | `bt_agent_node.py` | Iterative generate-validate-fix loop via raw HTTP API |
 | `rag` | `bt_rag_agent_node.py` | Same loop + RAG (ChromaDB + HuggingFace embeddings) to pre-filter relevant nodes |
-| `agentic` | `bt_agentic_node.py` | Fully agentic: the LLM autonomously calls validation tools via LangChain tool-calling |
+| `agentic` | `bt_rag_agentic_node.py` | Fully agentic: the LLM autonomously calls validation tools via LangChain tool-calling |
 
 ## Installation
 
@@ -52,7 +52,7 @@ You can run any agent directly:
 ```bash
 ros2 run llm_bt_builder bt_agent_node.py       # standard
 ros2 run llm_bt_builder bt_rag_agent_node.py   # RAG
-ros2 run llm_bt_builder bt_agentic_node.py     # agentic (tool-calling)
+ros2 run llm_bt_builder bt_rag_agentic_node.py   # agentic (tool-calling)
 ```
 
 #### Recommended: Use the launcher
@@ -233,7 +233,7 @@ Same iterative loop but adds a retrieval step:
 
 Best choice for large skill libraries. Launch with `agent_type:=rag`.
 
-### Agentic (`bt_agentic_node.py`)
+### Agentic (`bt_rag_agentic_node.py`)
 
 Fully agentic architecture using LangChain `bind_tools()`:
 - The LLM decides **when and in what order** to call the validation tools.
@@ -245,6 +245,45 @@ Fully agentic architecture using LangChain `bind_tools()`:
 Requires a **tool-calling capable model** (Gemini 1.5+, GPT-4o, Claude 3+, DeepSeek-v2+). Launch with `agent_type:=agentic`.
 
 **Extra dependencies (RAG and Agentic):** See `requirements.txt` for LangChain, ChromaDB, sentence-transformers, etc.
+
+---
+
+## Choosing an architecture
+
+The key difference between RAG (`bt_rag_agent_node`) and Agentic (`bt_rag_agentic_node`) is **where the reasoning lives**:
+
+| Aspect | RAG | Agentic |
+|---|---|---|
+| Validation logic | Python (deterministic) | LLM (autonomous) |
+| Retry decision | Hard-coded loop | LLM decides when to stop |
+| Error injection | Node injects errors into next prompt | LLM reads tool results and self-corrects |
+| LLM task | Generate XML only | Generate XML + navigate the tool flow |
+| Tool-calling required | No | Yes (hard requirement) |
+| Reasoning required | Low — any capable model | High — model must reason over tool outputs |
+
+### When to use RAG
+
+- The model is small or medium-sized (Llama 3.1, Gemini Flash, GPT-4o-mini).
+- You want predictable retry behaviour regardless of model reasoning quality.
+- You are using Ollama with a model that does not support tool calling.
+- Robustness matters more than autonomy.
+
+### When to use Agentic
+
+- You are using a strong reasoning model: GPT-4o, Claude 3.5+, Gemini 2.5 Pro.
+- The model has reliable, native tool-calling support.
+- You want the LLM to decide the validation strategy rather than following a fixed script.
+- You are experimenting with fully autonomous BT generation pipelines.
+
+### Failure modes with weak models in Agentic mode
+
+Using `agent_type:=agentic` with a model that lacks sufficient reasoning or tool-calling support can cause:
+
+- **Infinite loops** — the model calls tools randomly without convergence.
+- **Premature termination** — `submit_bt_xml` is called with incorrect XML before all validations pass.
+- **Schema errors** — the model generates tool call arguments that do not match the expected schema, causing `invoke` to fail.
+
+The programmatic guard on `submit_bt_xml` catches the last case, but the first two will exhaust `MAX_STEPS` (40) without producing a valid result. In those situations, switch to `agent_type:=rag`.
 
 ## Serving Local Models with Ollama
 
