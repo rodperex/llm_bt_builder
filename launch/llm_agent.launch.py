@@ -1,3 +1,17 @@
+# Copyright 2026 Rodrigo Pérez-Rodríguez
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, EnvironmentVariable, PythonExpression
@@ -29,7 +43,7 @@ def generate_launch_description():
         # OpenAI: 'gpt-4o', 'gpt-3.5-turbo'
         # Anthropic: 'claude-2', 'claude-instant-100k'
         # DeepSeek: 'deepseek-chat'
-        # Ollama: any local model you have set up (e.g., 'llama3.1', 'qwen2.5-coder:7b', 'deepseek-r
+        # Ollama: any local model you have set up (e.g., 'llama3.1', 'qwen2.5-coder:7b'
         description='Model ID to use (e.g., gemini-2.5-flash, llama3.1, qwen2.5-coder:1.5b, deepseek-chat)'
     )
 
@@ -42,7 +56,8 @@ def generate_launch_description():
     url_arg = DeclareLaunchArgument(
         'url',
         default_value='',
-        # Options per provider (base URLs, endpoints are added by the code):
+        # Leave empty to let each node auto-detect the URL based on the provider.
+        # Override only when needed (e.g. custom Ollama endpoint):
         # Gemini: 'https://generativelanguage.googleapis.com'
         # OpenAI: 'https://api.openai.com'
         # Anthropic: 'https://api.anthropic.com'
@@ -60,7 +75,7 @@ def generate_launch_description():
     agent_type_arg = DeclareLaunchArgument(
         'agent_type',
         default_value='rag',
-        description='Agent type: "rag" for RAG agent, "normal" for standard agent'
+        description='Agent type: "rag" for RAG agent, "normal" for standard agent, "agentic" for tool-calling agent'
     )
 
     prompt_file_arg = DeclareLaunchArgument(
@@ -109,6 +124,25 @@ def generate_launch_description():
         )
     )
 
+    # Agentic node (tool-calling / ReAct)
+    agentic_node = Node(
+        package='llm_bt_builder',
+        executable='bt_agentic_node.py',
+        name='llm_bt_agentic',
+        output='screen',
+        emulate_tty=True,
+        parameters=[{
+            'llm_provider': LaunchConfiguration('provider'),
+            'model_id': LaunchConfiguration('model'),
+            'api_url': LaunchConfiguration('url'),
+            'api_key': LaunchConfiguration('key'),
+            'prompt_file': LaunchConfiguration('prompt_file')
+        }],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'agentic'"])
+        )
+    )
+
     return LaunchDescription([
         provider_arg,
         model_arg,
@@ -118,5 +152,6 @@ def generate_launch_description():
         agent_type_arg,
         prompt_file_arg,
         rag_node,
-        normal_node
+        normal_node,
+        agentic_node,
     ])

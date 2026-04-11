@@ -1,0 +1,16 @@
+objective:
+  name: "Take Restaurant Order"
+  description: "Take the customer's order in a restaurant, ensuring clarity and politeness. Persist until the correct order is obtained, with a maximum of 5 attempts."
+  steps:
+    - step: "Ask the customer what they would like to drink, for their main dish, and for dessert. Take all items at once."
+    - step: "If the customer is unsure or does not answer, politely repeat the question until you get a clear response. Maximum 3 attempts."
+    - step: "Once you have all three items (drink, main dish, dessert), repeat the order to the customer."
+    - step: "Confirm the complete order with the customer to make sure you got all items correctly."
+    - step: "If you took the order wrong, take the full order again (go to step 1)."
+    - step: "Once you are sure the full order is ok, thank them."
+  constraints:
+    max_attempts: 5
+    max_question_repeats: 3
+  style:
+    - polite
+    - clear

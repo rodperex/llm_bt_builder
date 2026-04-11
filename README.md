@@ -1,6 +1,12 @@
 # llm_bt_builder
 
-Iterative Behavior Tree generator using Large Language Models (LLMs) for ROS 2 robots. Automatically creates Behavior Trees in XML format, using custom nodes defined in YAML and iterative reasoning with LLMs (local or API).
+Behavior Tree generator using Large Language Models (LLMs) for ROS 2 robots. Automatically creates Behavior Trees in XML format, using custom nodes defined in YAML. Three agent architectures are available:
+
+| Agent | File | Description |
+|---|---|---|
+| `normal` | `bt_agent_node.py` | Iterative generate-validate-fix loop via raw HTTP API |
+| `rag` | `bt_rag_agent_node.py` | Same loop + RAG (ChromaDB + HuggingFace embeddings) to pre-filter relevant nodes |
+| `agentic` | `bt_agentic_node.py` | Fully agentic: the LLM autonomously calls validation tools via LangChain tool-calling |
 
 ## Installation
 
@@ -42,23 +48,28 @@ Iterative Behavior Tree generator using Large Language Models (LLMs) for ROS 2 r
 
 ### Launch Server Nodes
 
-You can launch the standard agent node directly:
+You can run any agent directly:
 ```bash
-ros2 run llm_bt_builder bt_agent_node.py
-```
-
-Or launch the RAG agent node:
-```bash
-ros2 run llm_bt_builder bt_rag_agent_node.py
+ros2 run llm_bt_builder bt_agent_node.py       # standard
+ros2 run llm_bt_builder bt_rag_agent_node.py   # RAG
+ros2 run llm_bt_builder bt_agentic_node.py     # agentic (tool-calling)
 ```
 
 #### Recommended: Use the launcher
 
-The launcher allows you to select agent type, model, mode, API URL and key:
+The launcher selects the agent via `agent_type` (`normal` / `rag` / `agentic`):
 ```bash
-ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag model:=gemini-2.5-flash mode:=api url:=https://generativelanguage.googleapis.com/v1beta/openai/chat/completions key:=<API_KEY>
+# RAG agent (default)
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag model:=gemini-2.5-flash mode:=api key:=<API_KEY>
+
+# Standard agent
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=normal model:=gpt-4o key:=<API_KEY>
+
+# Agentic agent (requires a tool-calling capable model)
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=agentic provider:=openai model:=gpt-4o key:=<API_KEY>
 ```
-For the standard agent, use `agent_type:=normal`.
+
+> **Note:** `agent_type:=agentic` requires a model with tool-calling support: Gemini 1.5+, GPT-4o, Claude 3+, DeepSeek-v2+. Ollama support depends on the model.
 
 ### Launch Client Node
 
@@ -82,11 +93,15 @@ The client loads the robot capabilities from the YAML file (default: `config/soc
 
 ### Configuration
 
-Both server nodes accept ROS 2 parameters:
-- `execution_mode`: `local` (uses Hugging Face) or `api` (uses OpenAI, Groq, Ollama, LM Studio, etc.)
-- `model_id`: Model ID (e.g., `Qwen/Qwen2.5-Coder-1.5B-Instruct`)
-- `api_url`: REST endpoint URL (e.g., `http://localhost:11434/v1/chat/completions` for Ollama)
-- `api_key`: API key (only for cloud services)
+All server nodes accept these ROS 2 parameters:
+- `llm_provider`: `gemini`, `openai`, `anthropic`, `deepseek`, or `ollama`
+- `model_id`: Model ID (e.g., `gemini-2.5-flash`, `gpt-4o`, `llama3.1`)
+- `api_url`: REST endpoint URL (auto-detected per provider if empty)
+- `api_key`: API key (auto-detected from env vars if empty: `GEMINI_API_KEY`, `OPENAI_API_KEY`, etc.)
+- `prompt_file`: Prompt template filename in `prompts/` (e.g., `system_prompt_cot.txt`)
+
+The `bt_agent_node.py` additionally accepts:
+- `execution_mode`: `local` (Hugging Face) or `api`
 
 The client node accepts ROS 2 parameters:
 - `objective_file`: Path to the text file containing the objective (default: `objectives/explain.txt`)
@@ -203,19 +218,33 @@ bt_nodes:
 
 **Note:** Condition nodes typically only have SUCCESS and FAILURE states. Some continuous Action nodes may only return RUNNING until halted by the behavior tree.
 
-## RAG Mode (Retrieval-Augmented Generation)
+## Agent Architectures
 
-The RAG agent (`bt_rag_agent_node.py`) uses LangChain and embeddings to select the most relevant nodes from your YAML definitions before invoking the LLM. This improves the quality and relevance of generated Behavior Trees, especially for large skill libraries.
+### Normal (`bt_agent_node.py`)
 
-You can launch it directly or via the launcher with `agent_type:=rag`.
+Sends the full capabilities YAML to the LLM and runs a hard-coded generate → validate → fix loop (up to 25 retries). Uses raw HTTP requests without LangChain, so it works with any model accessible via a REST API.
 
-**Extra dependencies:** See requirements.txt for LangChain, ChromaDB, sentence-transformers, etc.
+### RAG (`bt_rag_agent_node.py`)
 
-**How it works:**
-- Indexes your YAML node definitions as vector embeddings.
-- Selects the top-K relevant nodes for your objective.
-- Constructs a prompt for the LLM using only those nodes.
-- Performs iterative validation (syntax and semantics) before returning the XML.
+Same iterative loop but adds a retrieval step:
+- Indexes all YAML node definitions as vector embeddings (ChromaDB + HuggingFace `all-MiniLM-L6-v2`).
+- Retrieves the top-K nodes semantically closest to the objective.
+- Sends only those nodes to the LLM, reducing prompt size and hallucinations.
+
+Best choice for large skill libraries. Launch with `agent_type:=rag`.
+
+### Agentic (`bt_agentic_node.py`)
+
+Fully agentic architecture using LangChain `bind_tools()`:
+- The LLM decides **when and in what order** to call the validation tools.
+- 4 tools are exposed: `validate_xml_syntax`, `validate_bt_structure`, `validate_bt_semantics`, `submit_bt_xml`.
+- `submit_bt_xml` is the termination signal — the LLM calls it when it considers the XML ready.
+- A programmatic safety check runs after `submit_bt_xml` as a final guard.
+- Also includes RAG for node pre-filtering.
+
+Requires a **tool-calling capable model** (Gemini 1.5+, GPT-4o, Claude 3+, DeepSeek-v2+). Launch with `agent_type:=agentic`.
+
+**Extra dependencies (RAG and Agentic):** See `requirements.txt` for LangChain, ChromaDB, sentence-transformers, etc.
 
 ## Serving Local Models with Ollama
 
@@ -265,14 +294,24 @@ This will allow llm_bt_builder to use your local Ollama server for LLM-based Beh
 - **Local:** Loads the model into memory (requires VRAM/RAM, useful for Hugging Face, Ollama, LM Studio).
 - **API:** Uses REST services (OpenAI, Groq, Gemini, etc.), requires API key and URL.
 
-## Launcher Example
+## Launcher Examples
 
 ```bash
-ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag model:=gemini-2.5-flash mode:=api url:=https://generativelanguage.googleapis.com/v1beta/openai/chat/completions key:=<API_KEY>
-```
-Or for Ollama local:
-```bash
-ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag model:=llama3 mode:=api url:=http://localhost:11434/v1/chat/completions key:=""
+# RAG agent with Gemini
+ros2 launch llm_bt_builder llm_agent.launch.py \
+  agent_type:=rag provider:=gemini model:=gemini-2.5-flash key:=<API_KEY>
+
+# Agentic agent with GPT-4o
+ros2 launch llm_bt_builder llm_agent.launch.py \
+  agent_type:=agentic provider:=openai model:=gpt-4o key:=<API_KEY>
+
+# RAG agent with Ollama (local)
+ros2 launch llm_bt_builder llm_agent.launch.py \
+  agent_type:=rag provider:=ollama model:=llama3.1 url:=http://localhost:11434
+
+# Agentic agent with Anthropic Claude
+ros2 launch llm_bt_builder llm_agent.launch.py \
+  agent_type:=agentic provider:=anthropic model:=claude-3-5-sonnet-20241022 key:=<API_KEY>
 ```
 
 ## License

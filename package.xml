@@ -4,7 +4,7 @@
   <name>llm_bt_builder</name>
   <version>0.0.1</version>
   <description>Generador iterativo de Behavior Trees usando LLMs</description>
-  <maintainer email="rodrigo.perez@urjc.es">Tu Nombre</maintainer>
+  <maintainer email="rodrigo.perez@urjc.es">Rodrigo Pérez-Rodríguez</maintainer>
   <license>Apache License 2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

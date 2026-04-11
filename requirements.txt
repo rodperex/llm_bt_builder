@@ -16,7 +16,10 @@ chromadb
 sentence-transformers
 
 # --- Local Mode (Hugging Face) ---
-torch>=2.0.0
-transformers>=4.30.0
-accelerate>=0.20.3
-bitsandbytes
+# These dependencies are required only if you want to run LLM inference locally
+# using Hugging Face models (i.e. without an external API).
+# This mode is not currently implemented in the nodes; uncomment if you add it.
+# torch>=2.0.0
+# transformers>=4.30.0
+# accelerate>=0.20.3
+# bitsandbytes
