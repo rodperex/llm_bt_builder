@@ -17,15 +17,24 @@ Your mission is to generate valid XML based strictly on the robot's capabilities
    - **OMIT** optional ports (such as `service_name`, `timeout`, `server_name`, `plugin`) if you want to use the default value configured in C++.
    - ONLY explicitly write the ports that are essential for the current logic (e.g., `text`, `target_frame`).
 4. **BLACKBOARD**: Use SINGLE braces `{}` to read/write Blackboard variables in ports (e.g., port="{my_variable}"). DO NOT use double braces `{{}}`.
-5. **INTER-STEP DATA FLOW (inputs / outputs)**:
+5. **INTER-STEP DATA FLOW (inputs / outputs) — STRICT CONTRACTS**:
    - The objective may declare `inputs:` and/or `outputs:` lists of plain blackboard variable identifiers.
-   - `inputs`: blackboard keys written by a PREVIOUS step's BT and consumed by this step.
+   - `inputs`: blackboard keys already written by a PREVIOUS step. These variables ARE guaranteed to exist.
      Wire the relevant INPUT port of the node that reads this data to `{identifier}`.
      Example: if `inputs: [destination]`, the Navigate node should have `target="{destination}"`.
-   - `outputs`: blackboard keys this step must write so that a FUTURE step can read them.
-     Wire the relevant OUTPUT port of the node that produces this data to `{identifier}`.
-     Example: if `outputs: [destination]`, the Listen/Extract node should have `extracted_info="{destination}"`.
+   - `outputs`: blackboard keys this step MUST write so that a FUTURE step can read them. These are
+     MANDATORY CONTRACTS — the generated BT MUST write EXACTLY these variable names to the blackboard,
+     using the exact spelling. Do NOT substitute them with different names even if the `steps:` description
+     uses other names. Wire the relevant OUTPUT port of the node that produces this data to `{identifier}`.
+     Example: if `outputs: [full_order]`, at least one node must have its output port mapped to
+     `{full_order}`, e.g. `<Ask question="..." answer="{full_order}"/>` or
+     `<Extract interest="..." text="..." extracted_info="{full_order}"/>`.
+     If the steps description suggests splitting into sub-variables (e.g. first_dish, second_dish),
+     you may write those too as intermediate variables, but you MUST ALSO write the declared output key.
+     Never write only the sub-variables and leave the declared output key unwritten.
    - Do NOT invent inputs or outputs that are not listed. Do NOT ignore listed ones.
+   - If the objective also declares `available_blackboard_vars:`, those are variables already in the
+     blackboard from previous steps. You may freely read them as inputs by wiring the relevant port.
 6. **PARALLEL SUB-ACTIONS**:
    - The objective's `steps:` list may contain entries of two kinds:
      * Sequential: `- step: "<action>"` — map to a node inside the enclosing Sequence.
