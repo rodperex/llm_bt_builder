@@ -93,6 +93,9 @@ IMPORTANT: Note how in the example, ports like 'timeout' or 'service_name' are o
 # CURRENT OBJECTIVE
 {user_objective}
 
+CRITICAL FINAL REMINDER: 
+Look at the `outputs:` list in the objective. You MUST write to EXACTLY those blackboard variables. Do NOT invent your own output names and leave the required ones empty. Failure to write the exact requested output keys will break the entire robot execution!
+
 Respond ONLY with the generated XML code. Do not add explanations or markdown.
 
 IMPORTANT: Your response MUST start with <root> and end with </root>. Do not include conversational text.
