@@ -24,16 +24,18 @@ def generate_launch_description():
     provider_arg = DeclareLaunchArgument(
         'provider',
         default_value='openai',
-        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama'
+        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova'
         description='LLM Provider: gemini, openai, anthropic, deepseek, or ollama'
     )
 
     model_arg = DeclareLaunchArgument(
         'model',
-        # default_value='gemini-2.5-flash',
+        # default_value='Meta-Llama-3.3-70B-Instruct',
+        # default_value='gemini-2.5-flash-lite',
+        # default_value='llama-3.1-8b-instant',
         default_value='gpt-4o',
         # default_value='gemini-2.0-flash-lite',
-        # default_value='llama3.1', # ollama (powerful GPU required)
+        # default_value='qwen2.5-coder:3b', # ollama (lighter model for testing)
         # default_value='qwen2.5-coder:7b', # ollama (powerful GPU required)
         # default_value ='deepseek-r1:8b', # ollama
         # default_value='deepseek-chat', # deepseek cloud API
@@ -44,6 +46,9 @@ def generate_launch_description():
         # Anthropic: 'claude-2', 'claude-instant-100k'
         # DeepSeek: 'deepseek-chat'
         # Ollama: any local model you have set up (e.g., 'llama3.1', 'qwen2.5-coder:7b'
+        # Groq: 'llama-3.3-70b-versatile'
+        # Groq: 'llama-3.1-8b-instant'
+        # Sambanova: 'Meta-Llama-3.3-70B-Instruct'
         description='Model ID to use (e.g., gemini-2.5-flash, llama3.1, qwen2.5-coder:1.5b, deepseek-chat)'
     )
 
@@ -80,7 +85,7 @@ def generate_launch_description():
 
     prompt_file_arg = DeclareLaunchArgument(
         'prompt_file',
-        default_value='system_prompt_cot.txt',
+        default_value='system_prompt.txt',
         description='Prompt file name in prompts/ directory (e.g., system_prompt.txt)'
     )
 

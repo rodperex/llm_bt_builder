@@ -1,0 +1,10 @@
+# Request
+string objective
+string broken_bt_xml
+string error_message
+string bt_nodes_yaml
+---
+# Response
+bool success
+string bt_xml
+string message

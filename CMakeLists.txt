@@ -12,6 +12,7 @@ find_package(rosidl_default_generators REQUIRED)
 # 1. Generar el Servicio Personalizado (Esto ya crea el módulo Python para el srv)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GenerateBT.srv"
+  "srv/FixBT.srv"
 )
 
 # 2. Instalar el script ejecutable directamente

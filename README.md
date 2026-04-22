@@ -353,6 +353,44 @@ ros2 launch llm_bt_builder llm_agent.launch.py \
   agent_type:=agentic provider:=anthropic model:=claude-3-5-sonnet-20241022 key:=<API_KEY>
 ```
 
+## For BT Node Developers
+
+If you are developing new **BT nodes** or extending the behavior tree capabilities, these resources are essential:
+
+### Error Code Reference
+
+**📖 [ERROR_CODES.md](ERROR_CODES.md)** — Standard error codes for structured failure reporting.
+
+This document defines the failure codes that BT nodes should emit when encountering errors. Using structured codes (instead of text-based error messages) ensures:
+- ✅ The orchestrator can reliably classify failures (doesn't break if you rephrase the error message)
+- ✅ The system can make robust decisions (FixBT vs Replan) based on error types
+- ✅ New developers understand what codes to use when implementing nodes
+
+**Key codes:**
+- `bt_config_error` — Configuration error (missing required input, invalid parameter type)
+- `execution_error` — General execution failure (default)
+- `service_unavailable` — Service/action server not available (planned)
+- `target_not_detected` — Perception/detection failure (planned)
+- `timeout` — Action exceeded max time (planned)
+
+**How to use:** When your BT node fails, call the `bt_failure()` helper function with the appropriate error code:
+
+```cpp
+#include "bt_nodes/bt_failure.hpp"
+
+// In your BT action node:
+if (!my_required_input) {
+    return bt_failure(
+        config(),
+        registrationName(),
+        "missing required input 'my_input', received: '" + my_required_input + "'",
+        "bt_config_error"  // ← Structured code
+    );
+}
+```
+
+See [ERROR_CODES.md](ERROR_CODES.md) for the full list of codes, when to use each one, and implementation examples.
+
 ## License
 
 Apache License 2.0

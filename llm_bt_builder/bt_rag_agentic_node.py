@@ -36,7 +36,7 @@
 import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
-from llm_bt_builder.srv import GenerateBT
+from llm_bt_builder.srv import GenerateBT, FixBT
 
 import yaml
 import re
@@ -111,6 +111,9 @@ class AgenticBTNode(Node):
         self.decorators     = self._extract_node_names(self.bt_decorator_nodes_yaml)
         self.special_nodes  = ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
         self.structural_nodes = set(self.decorators + self.control_nodes + self.special_nodes)
+        self.structural_required_ports = self._parse_structural_required_ports(
+            self.bt_decorator_nodes_yaml, self.bt_control_nodes_yaml
+        )
 
         # ── LLM & embeddings ──────────────────────────────────────────────────
         self.llm        = self._setup_llm()
@@ -118,6 +121,7 @@ class AgenticBTNode(Node):
 
         # ── Service ───────────────────────────────────────────────────────────
         self.srv = self.create_service(GenerateBT, 'generate_bt', self.generate_bt_callback)
+        self.fix_srv = self.create_service(FixBT, 'fix_bt', self.fix_bt_callback)
         self.get_logger().info(
             f"✅ Agentic Node ready. Provider: {self.llm_provider}, Model: {self.model_id}"
         )
@@ -194,6 +198,7 @@ class AgenticBTNode(Node):
         decorators      = self.decorators
         control_nodes   = self.control_nodes
         structural_nodes = self.structural_nodes
+        structural_required_ports = self.structural_required_ports
 
         # Mutable state shared between submit_bt_xml closure and the caller
         submit_state = {"xml": None, "done": False}
@@ -240,6 +245,11 @@ class AgenticBTNode(Node):
                 elif elem.tag in ('AlwaysSuccess', 'AlwaysFailure'):
                     if n > 0:
                         return f"ERROR: <{elem.tag}> must have 0 children, found {n}."
+                required = structural_required_ports.get(elem.tag, [])
+                for req_port in required:
+                    if req_port not in elem.attrib:
+                        return (f"ERROR: <{elem.tag}> is missing required attribute '{req_port}'. "
+                                f"Add it, e.g. {req_port}=\"3\".")
 
             return "VALID: BehaviorTree structure is correct."
 
@@ -382,6 +392,22 @@ class AgenticBTNode(Node):
         except Exception:
             return []
 
+    def _parse_structural_required_ports(self, *yaml_contents):
+        """Extract required port names for each structural (control/decorator) node."""
+        required = {}
+        for content in yaml_contents:
+            try:
+                data = yaml.safe_load(content)
+                for node in data.get('bt_nodes', []):
+                    ports = node.get('ports', []) or []
+                    req = [p.get('name') or p.get('key')
+                           for p in ports if p.get('name') or p.get('key')]
+                    if req:
+                        required[node['name']] = req
+            except Exception:
+                pass
+        return required
+
     def _extract_xml(self, text):
         match = re.search(r'```xml(.*?)```', text, re.DOTALL)
         if match:
@@ -413,6 +439,9 @@ class AgenticBTNode(Node):
                 return False, f"Decorator <{elem.tag}> must have 1 child, found {n}"
             elif elem.tag in self.control_nodes and n < 1:
                 return False, f"Control node <{elem.tag}> must have ≥1 child"
+            for req_port in self.structural_required_ports.get(elem.tag, []):
+                if req_port not in elem.attrib:
+                    return False, (f"<{elem.tag}> missing required attribute '{req_port}'")
 
         # Phase 3 — Semantics
         for elem in root.iter():
@@ -433,10 +462,20 @@ class AgenticBTNode(Node):
     # ─────────────────────────────────────────────────────────────────────────
 
     def generate_bt_callback(self, request, response):
+        return self._run_agentic_pipeline(request, response, is_fix=False)
+
+    def fix_bt_callback(self, request, response):
+        return self._run_agentic_pipeline(request, response, is_fix=True)
+
+    def _run_agentic_pipeline(self, request, response, is_fix):
         K         = 10
         MAX_STEPS = 40   # upper bound on total tool-call steps
 
-        self.get_logger().info(f"🎯 Agentic request: '{request.objective}'")
+        if is_fix:
+            self.get_logger().info(f"🔧 FIX BT Request received! Error to fix: '{request.error_message}'")
+            self.get_logger().info(f"🎯 Original Objective: '{request.objective}'")
+        else:
+            self.get_logger().info(f"🎯 NEW Agentic BT Request: '{request.objective}'")
 
         # 1. Parse full node specs for final validation
         full_node_specs = self._parse_full_specs(request.bt_nodes_yaml)
@@ -494,10 +533,22 @@ class AgenticBTNode(Node):
         llm_with_tools      = self.llm.bind_tools(tools)
         tool_map            = {t.name: t for t in tools}
 
-        messages = [
-            SystemMessage(content=system_content + agentic_addendum),
-            HumanMessage(content=request.objective),
-        ]
+        if is_fix:
+            fix_prompt = (
+                f"You previously generated an XML for this objective but it failed:\n"
+                f"```xml\n{request.broken_bt_xml}\n```\n\n"
+                f"It failed with this error:\n{request.error_message}\n\n"
+                f"Please write a NEW, fixed XML that resolves this error and satisfies the objective: {request.objective}\n"
+            )
+            messages = [
+                SystemMessage(content=system_content + agentic_addendum),
+                HumanMessage(content=fix_prompt),
+            ]
+        else:
+            messages = [
+                SystemMessage(content=system_content + agentic_addendum),
+                HumanMessage(content=request.objective),
+            ]
 
         # 5. Agentic loop ──────────────────────────────────────────────────
         for step in range(MAX_STEPS):
@@ -514,7 +565,7 @@ class AgenticBTNode(Node):
             if ai_msg.content:
                 think = re.search(r'<think>(.*?)</think>', ai_msg.content, re.DOTALL)
                 if think:
-                    self.get_logger().info(
+                    self.get_logger().debug(
                         f"\n🤔 CHAIN OF THOUGHT:\n\033[93m{think.group(1).strip()}\033[0m\n"
                     )
 
@@ -541,6 +592,13 @@ class AgenticBTNode(Node):
                     # ── submit_bt_xml intercepted ──────────────────────────
                     if submit_state["done"]:
                         xml_str  = self._extract_xml(submit_state["xml"])
+
+                        # Add model name comment
+                        comment = f"\n  <!-- Generated by model: {self.model_id} -->"
+                        root_idx = xml_str.find("<root")
+                        if root_idx != -1:
+                            end_idx = xml_str.find(">", root_idx) + 1
+                            xml_str = xml_str[:end_idx] + comment + xml_str[end_idx:]
                         ok, err  = self._final_validate(xml_str, full_node_specs)
 
                         if ok:

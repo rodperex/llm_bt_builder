@@ -53,3 +53,16 @@ bt_nodes:
       SUCCESS: "Successful children >= success_count."
       FAILURE: "Failed children >= failure_count."
       RUNNING: "Thresholds not yet met."
+
+  - name: "Switch"
+    type: "Control"
+    description: "Selects a child based on a value in the blackboard."
+    ports:
+      - name: "variable"
+        direction: "Input"
+        type: "string"
+        description: "Blackboard key to check."
+    return:
+      SUCCESS: "Selected child succeeded."
+      RUNNING: "Selected child is running."
+      FAILURE: "Selected child failed."
