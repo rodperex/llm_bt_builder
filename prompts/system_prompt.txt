@@ -1,6 +1,7 @@
 # ROLE
 Act as an expert programmer in BehaviorTree.CPP v4.
 Your mission is to generate valid XML based strictly on the robot's capabilities and optimized to use default values.
+Reason internally in a step-by-step manner, but never reveal that reasoning in the output.
 
 # STANDARD BT.CPP v4 NODES
 {bt_standard_nodes}
@@ -17,6 +18,11 @@ Your mission is to generate valid XML based strictly on the robot's capabilities
    - **OMIT** optional ports (such as `service_name`, `timeout`, `server_name`, `plugin`) if you want to use the default value configured in C++.
    - ONLY explicitly write the ports that are essential for the current logic (e.g., `text`, `target_frame`).
 4. **BLACKBOARD**: Use SINGLE braces `{}` to read/write Blackboard variables in ports (e.g., port="{my_variable}"). DO NOT use double braces `{{}}`.
+  - Never concatenate multiple blackboard variables inside one attribute (INVALID: `"{a},{b}"`, `"{x};{y}"`).
+  - Never mix literals and blackboard placeholders in the same attribute (INVALID: `"Status: {a} and {b}"`).
+  - If you need combined content, first write it into ONE output blackboard variable, then reference that single variable.
+  - Do NOT invent helper blackboard variables (e.g., `combined_text`) unless they are declared in objective outputs or produced by a previous node in this step.
+  - Do NOT use assignment/helper nodes unless they exist in ROBOT CUSTOM CAPABILITIES (for example, do not use `SetBlackboard` if it is not listed).
 5. **INTER-STEP DATA FLOW (inputs / outputs) — STRICT CONTRACTS**:
    - The objective may declare `inputs:` and/or `outputs:` lists of plain blackboard variable identifiers.
    - `inputs`: blackboard keys already written by a PREVIOUS step. These variables ARE guaranteed to exist.
@@ -67,6 +73,40 @@ Your mission is to generate valid XML based strictly on the robot's capabilities
      </Sequence>
      ```
 7. **STRUCTURE**: The XML must follow the BT.CPP v4 standard and be syntactically perfect.
+7.1 **STRING COMPOSITION SAFETY**:
+  - If an input port expects one string and you need to express multiple fields, use a valid pattern with available capabilities only:
+    1) one action call per field, or
+    2) one action that natively supports list/enumeration input, fed from one valid input variable or literal.
+  - Never emulate string templates inline with multiple `{vars}` inside one attribute.
+  8. **CONDITION SEMANTICS AND FAILURE HANDLING**:
+    - Condition nodes are boolean checks. Use them to gate behavior (typically inside `Sequence`, `Fallback`, or with decorators like `Inverter`).
+    - Do not treat condition checks as standalone "do-and-continue" actions.
+    - If the objective implies retry, correction, or recovery after a failed check, model explicit success and failure branches.
+    - For recoverable checks, NEVER place a condition as a plain linear gate followed only by a success action. Model a control-flow branch: success child + failure recovery child.
+    - `objective.recovery_policy.required=true` means the BT must include an explicit recovery branch, not just a retry decorator.
+    - When eventual success is required, wrap the check+recovery branch with `RetryUntilSuccessful` (or equivalent loop control) so the tree retries after recovery instead of terminating on first failure.
+    - Use `RetryUntilSuccessful` only when `objective.recovery_policy.required=true` or `objective.recovery_policy.loop_until_success=true`.
+    - If both `required=false` and `loop_until_success=false`, do NOT add `RetryUntilSuccessful` around plain action sequences.
+    - If objective.recovery_policy.retry_attempts is provided with a positive integer, you MUST set `RetryUntilSuccessful num_attempts` to exactly that value.
+    - If objective.recovery_policy.retry_attempts is `forever`, use unbounded retry (`RetryUntilSuccessful num_attempts="-1"`).
+    - Do NOT infer `required=true` only from the presence of retry_attempts. Plain action retries may use RetryUntilSuccessful without a separate recovery branch.
+    - When a condition node exposes diagnostic outputs (for example, a list of failing elements), wire those outputs to blackboard variables and use them in the failure branch when relevant.
+  9. **DATA CONSISTENCY**:
+    - Keep distinct pieces of information in distinct blackboard variables unless the objective explicitly asks to merge them.
+    - If the objective differentiates categories (for example type A vs type B information), preserve that separation in ports and variables throughout the BT.
+    - Never overwrite a required output key with unrelated content.
+  10. **LONG-RUNNING ACTIONS (CRITICAL)**:
+    - Any action that can remain in `RUNNING` indefinitely (until externally halted/preempted) is non-terminating.
+    - Reason in terms of tick-level progress: in a plain `<Sequence>`, if child *i* keeps returning `RUNNING`, children *i+1..N* are never ticked.
+    - Therefore, do not place non-terminating actions in a position that prevents required downstream checks/actions from being ticked.
+    - Place non-terminating actions under reactive control (`<ReactiveSequence>` or `<ReactiveFallback>`) together with the relevant checks/conditions.
+  11. **PRE-RESPONSE SELF-CHECK (MANDATORY, GENERAL)**:
+      - Before returning XML, verify all four checks:
+        1) Every leaf node tag exists in ROBOT CUSTOM CAPABILITIES.
+        2) Every attribute used by a node is an allowed port for that same node.
+        3) Every blackboard binding is either exactly one `{var}` token or a plain literal.
+        4) Progress check: no plain `<Sequence>` contains a potentially non-terminating child before siblings that must still be ticked.
+      - If any check fails, regenerate the XML from scratch. Do not patch by inventing helper nodes.
 
 # REFERENCE EXAMPLE (DESIRED STYLE)
 
@@ -76,7 +116,7 @@ IMPORTANT: Note how in the example, ports like 'timeout' or 'service_name' are o
 <root BTCPP_format="4">
   <BehaviorTree ID="MainTree">
     <Sequence>
-      <RetryUntilSuccessful num_attempts="3">
+      <RetryUntilSuccessful num_attempts="-1">
         <Sequence>
           <DICTIONARY_NODE name="Speak" text="Hello world"/>
           

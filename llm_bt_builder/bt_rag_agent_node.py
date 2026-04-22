@@ -65,7 +65,9 @@ class RagBTAgent(Node):
                 'openai': ['OPENAI_API_KEY'],
                 'anthropic': ['ANTHROPIC_API_KEY'],
                 'deepseek': ['DEEPSEEK_API_KEY'],
-                'ollama': ['LLM_API_KEY']
+                'ollama': ['LLM_API_KEY'],
+                'groq': ['GROQ_API_KEY'],
+                'sambanova': ['SAMBANOVA_API_KEY']
             }
             
             env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
@@ -180,6 +182,44 @@ class RagBTAgent(Node):
                     temperature=0.1,
                     timeout=TIMEOUT
                 )
+            elif self.llm_provider == 'groq':
+                self.get_logger().info(f"⚡ Configuring Groq ({self.model_id})...")
+                base_url = None
+                if self.api_url and self.api_url != '':
+                    base_url = self.api_url.rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        base_url = base_url + '/v1'
+                else:
+                    base_url = "https://api.groq.com/openai/v1"
+                
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
+            elif self.llm_provider == 'sambanova':
+                self.get_logger().info(f"🌐 Configuring SambaNova ({self.model_id})...")
+                base_url = None
+                if self.api_url and self.api_url != '':
+                    base_url = self.api_url.rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        base_url = base_url + '/v1'
+                else:
+                    base_url = "https://api.sambanova.ai/v1"
+                
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
             else:
                 self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
                 return None
@@ -277,13 +317,151 @@ class RagBTAgent(Node):
             for node in data.get('bt_nodes', []):
                 raw_ports = node.get('ports', [])
                 current_ports = []
+                required_inputs = []
+                input_ports = set()
+                output_ports = set()
                 if raw_ports:
                     for p in raw_ports:
                         p_name = p.get('key') or p.get('name')
-                        if p_name: current_ports.append(p_name)
-                specs[node['name']] = current_ports
+                        if not p_name:
+                            continue
+                        current_ports.append(p_name)
+
+                        # Infer required input ports from node description metadata.
+                        direction = str(p.get('direction', '')).lower()
+                        description = str(p.get('description', '')).lower()
+                        if direction == 'input':
+                            input_ports.add(p_name)
+                        elif direction == 'output':
+                            output_ports.add(p_name)
+
+                        if direction == 'input' and 'required' in description:
+                            required_inputs.append(p_name)
+
+                specs[node['name']] = {
+                    'ports': current_ports,
+                    'required_inputs': required_inputs,
+                    'input_ports': input_ports,
+                    'output_ports': output_ports,
+                    'type': str(node.get('type', '')).strip().lower(),
+                }
             return specs
         except: return {}
+
+    def _extract_known_blackboard_vars(self, objective_text):
+        """Collect blackboard vars that are readable at step start."""
+        known = set()
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return known
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    # Only inputs and available_blackboard_vars are readable at step start.
+                    # Declared outputs must be produced by this step, not assumed pre-existing.
+                    if k in ('available_blackboard_vars', 'inputs') and isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, str) and item.strip():
+                                known.add(item.strip())
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+        return known
+
+    def _extract_required_output_vars(self, objective_text):
+        """Collect blackboard vars that this step must write (declared outputs)."""
+        required = set()
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return required
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'outputs' and isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, str) and item.strip():
+                                required.add(item.strip())
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+        return required
+
+    def _extract_recovery_policy(self, objective_text):
+        """Read structured recovery policy from objective YAML (no keyword heuristics)."""
+        policy = {
+            'required': False,
+            'loop_required': False,
+            'retry_attempts': None,
+        }
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return policy
+
+        if not isinstance(data, dict):
+            return policy
+
+        # Preferred explicit contract, expected at objective.recovery_policy
+        # but accepted recursively to keep compatibility with future schema moves.
+        recovery_blocks = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'recovery_policy' and isinstance(v, dict):
+                        recovery_blocks.append(v)
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+
+        for block in recovery_blocks:
+            if bool(block.get('required', False)):
+                policy['required'] = True
+            if bool(block.get('loop_until_success', False)):
+                policy['loop_required'] = True
+
+            raw_retry = block.get('retry_attempts', None)
+            if raw_retry is None:
+                continue
+
+            # Ignore booleans (bool is a subclass of int in Python).
+            if isinstance(raw_retry, bool):
+                continue
+
+            parsed_retry = None
+            if isinstance(raw_retry, (int, float)):
+                parsed_retry = int(raw_retry)
+            elif isinstance(raw_retry, str):
+                value = raw_retry.strip().lower()
+                if value in ('', 'null', 'none'):
+                    parsed_retry = None
+                elif value == 'forever':
+                    parsed_retry = 'forever'
+                else:
+                    try:
+                        parsed_retry = int(value)
+                    except ValueError:
+                        parsed_retry = None
+
+            if parsed_retry == 'forever':
+                policy['retry_attempts'] = 'forever'
+            elif parsed_retry is not None and parsed_retry > 0:
+                policy['retry_attempts'] = parsed_retry
+
+        return policy
 
     def generate_bt_callback(self, request, response):
         return self._run_agentic_pipeline(request, response, is_fix=False)
@@ -303,6 +481,9 @@ class RagBTAgent(Node):
 
         # 1. DATA PREPARATION
         full_node_specs = self.parse_full_specs(request.bt_nodes_yaml)
+        known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        required_output_vars = self._extract_required_output_vars(request.objective)
+        recovery_policy = self._extract_recovery_policy(request.objective)
 
         # 2. RAG (Only done once at the beginning)
         vector_db = self.create_vector_store(request.bt_nodes_yaml)
@@ -353,6 +534,8 @@ class RagBTAgent(Node):
             ]
 
         # 4. RETRY LOOP 🔄
+        last_semantic_error = ""
+        repeated_semantic_error_count = 0
         for attempt in range(MAX_RETRIES):
             self.get_logger().info(f"Attempt {attempt + 1}/{MAX_RETRIES}...")
 
@@ -397,12 +580,79 @@ class RagBTAgent(Node):
                     continue
 
                 # C. Semantic Validation
-                is_valid_bt, bt_msg = self.validate_bt_semantics(xml_str, full_node_specs)
+                is_valid_bt, bt_msg = self.validate_bt_semantics(
+                    xml_str,
+                    full_node_specs,
+                    known_bb_vars,
+                    required_output_vars,
+                    recovery_policy,
+                )
                 if not is_valid_bt:
                     self.get_logger().warn(f"⚠️ BT Semantic Error: {bt_msg}")
-                    # Specific feedback about invented nodes
+                    # Targeted feedback helps the model repair invalid blackboard bindings.
+                    repair_hint = (
+                        "Use only valid nodes/ports from capabilities and return a complete XML from scratch. "
+                        "Before responding, run this internal checklist: "
+                        "(1) every leaf node exists in capabilities, "
+                        "(2) every attribute is an allowed port for that node, "
+                        "(3) each blackboard attribute uses either one token {var} or a plain literal."
+                    )
+                    if "malformed blackboard reference" in bt_msg or "invalid blackboard key" in bt_msg:
+                        repair_hint = (
+                            "Use exactly ONE blackboard variable per attribute (e.g., text=\"{full_order}\"). "
+                            "Do NOT use concatenations like \"{a},{b}\" or \"{x};{y}\". "
+                            "Do NOT mix literals with blackboard placeholders in one attribute "
+                            "(invalid: text=\"Chef, order is {a} and {b}\"). "
+                            "If you need to say multiple variables, split into multiple nodes "
+                            "(e.g., one Speak literal + one Speak per variable, or Ask/Extract to build a single variable first)."
+                        )
+                    elif "reads unknown blackboard key" in bt_msg:
+                        repair_hint = (
+                            "Only read variables declared in objective inputs/available_blackboard_vars, "
+                            "or variables produced earlier in the same BT step. "
+                            "If you need this value, either add the correct input key or write it before reading it. "
+                            "Do not invent helper variables like combined_order unless a previous node writes them."
+                        )
+                    elif "did not write required output" in bt_msg:
+                        repair_hint = (
+                            "The step objective declares mandatory outputs. "
+                            "Map the corresponding output port(s) to those exact blackboard keys before step completion."
+                        )
+                    elif "does NOT exist in the capabilities YAML" in bt_msg:
+                        repair_hint = (
+                            "You used a node that is not in capabilities. "
+                            "Replace every unknown node with valid capabilities-only nodes and redesign the flow without helper/invented nodes. "
+                            "If data transformation is needed, use only existing node outputs and objective-declared variables."
+                        )
+                    elif "recoverable checks" in bt_msg or "Recovery branch" in bt_msg:
+                        repair_hint = (
+                            "Recovery policy is declared in objective.recovery_policy. "
+                            "Use explicit branching with success and recovery paths "
+                            "(Fallback/ReactiveFallback), and include loop control (RetryUntilSuccessful/Repeat) "
+                            "when loop_until_success is true. "
+                            "If recovery_policy.retry_attempts is provided, set RetryUntilSuccessful num_attempts to that exact value."
+                        )
+                    elif "must not use RetryUntilSuccessful" in bt_msg:
+                        repair_hint = (
+                            "This step is not a recovery-loop step. Remove RetryUntilSuccessful and keep a plain Sequence "
+                            "unless objective.recovery_policy.required=true or loop_until_success=true."
+                        )
+
+                    if bt_msg == last_semantic_error:
+                        repeated_semantic_error_count += 1
+                    else:
+                        last_semantic_error = bt_msg
+                        repeated_semantic_error_count = 1
+
+                    if repeated_semantic_error_count >= 2:
+                        repair_hint += (
+                            " You are repeating the same semantic error. "
+                            "Discard the previous invalid structure and regenerate the BT from scratch, "
+                            "strictly applying the 3-point checklist before returning XML."
+                        )
+
                     messages.append(AIMessage(content=ai_msg.content))
-                    messages.append(HumanMessage(content=f"ERROR: {bt_msg}. You MUST use ONLY the tools provided in the list above."))
+                    messages.append(HumanMessage(content=f"ERROR: {bt_msg}. {repair_hint}"))
                     time.sleep(1)
                     continue # Next attempt
 
@@ -484,17 +734,22 @@ class RagBTAgent(Node):
                 for req_port in self.structural_required_ports.get(elem.tag, []):
                     if req_port not in elem.attrib:
                         return False, (f"<{elem.tag}> is missing required attribute '{req_port}'. "
-                                       f"Add it, e.g. {req_port}=\"3\".")
+                                       f"Add it, e.g. {req_port}=\"1\".")
             
             return True, "OK"
         except Exception as e:
             return False, str(e)
 
-    def validate_bt_semantics(self, xml_string, node_specs):
+    def validate_bt_semantics(self, xml_string, node_specs, known_bb_vars=None, required_outputs=None, recovery_policy=None):
         # Check that custom nodes exist in YAML and ports are correct
         # Note: Structural validation is done in validate_xml_bt
         try:
             root = ET.fromstring(xml_string)
+            known_bb_vars = set(known_bb_vars or [])
+            required_outputs = set(required_outputs or [])
+            produced_in_tree = set()
+            parent_map = {child: parent for parent in root.iter() for child in list(parent)}
+            recovery_policy = recovery_policy or {'required': False, 'loop_required': False, 'retry_attempts': None}
             
             for elem in root.iter():
                 # Skip structural BT.CPP nodes (using set for O(1) lookup)
@@ -504,14 +759,165 @@ class RagBTAgent(Node):
                 # Validate custom/action nodes from YAML
                 if elem.tag not in node_specs:
                     return False, f"Node <{elem.tag}> does NOT exist in the capabilities YAML."
+
+                spec = node_specs[elem.tag]
+                allowed_ports = spec.get('ports', [])
+                required_inputs = spec.get('required_inputs', [])
+                input_ports = spec.get('input_ports', set())
+                output_ports = spec.get('output_ports', set())
+
+                # Validate required input ports are explicitly wired.
+                missing_required = []
+                for req in required_inputs:
+                    if req not in elem.attrib or str(elem.attrib.get(req, '')).strip() == '':
+                        missing_required.append(req)
+                if missing_required:
+                    return False, (
+                        f"Node <{elem.tag}> is missing required input port(s): {missing_required}. "
+                        f"Provide explicit values for those attributes."
+                    )
                 
                 # Validate ports/attributes
-                allowed_ports = node_specs[elem.tag]
                 for attr in elem.attrib:
                     if attr in ['name', 'ID']:  # Structural attributes
                         continue
                     if attr not in allowed_ports:
                         return False, f"Node <{elem.tag}> has an illegal port: '{attr}'. Allowed: {allowed_ports}"
+
+                    # Blackboard references must be exactly one {var} token, not concatenations.
+                    value = str(elem.attrib[attr]).strip()
+                    if '{' in value or '}' in value:
+                        refs = re.findall(r'\{[^{}]+\}', value)
+                        if len(refs) != 1 or refs[0] != value:
+                            return False, (
+                                f"Node <{elem.tag}> has malformed blackboard reference in port '{attr}': '{value}'. "
+                                f"Use exactly one blackboard variable like '{{my_var}}', or a plain literal."
+                            )
+
+                        # Reject invalid BB keys like '{a},{b}' or '{a};{b}' interpreted as a single missing key.
+                        bb_key = value[1:-1]
+                        if ',' in bb_key or ';' in bb_key:
+                            return False, (
+                                f"Node <{elem.tag}> port '{attr}' uses an invalid blackboard key '{bb_key}'. "
+                                f"Do not concatenate multiple variables inside one {{}}. "
+                                f"Write to a single combined variable first, then pass that variable."
+                            )
+
+                        # Reads must refer to values available at step start or produced earlier in this BT.
+                        # Use direction metadata when available; otherwise default to read for non-output ports.
+                        is_read_ref = (attr in input_ports) or (attr not in output_ports)
+                        if is_read_ref and bb_key not in known_bb_vars and bb_key not in produced_in_tree:
+                            return False, (
+                                f"Node <{elem.tag}> reads unknown blackboard key '{bb_key}' in input port '{attr}'. "
+                                f"Declare it in objective inputs/available_blackboard_vars or write it earlier in this step."
+                            )
+
+                        if attr in output_ports:
+                            produced_in_tree.add(bb_key)
+
+                    elif attr in output_ports and value:
+                        # Track literal outputs too, so later inputs can consume these keys when mapped.
+                        literal_key = value.strip()
+                        if literal_key.startswith('{') and literal_key.endswith('}'):
+                            produced_in_tree.add(literal_key[1:-1])
+
+            # Enforce declared inter-step contract: all required outputs must be produced.
+            missing_outputs = required_outputs - produced_in_tree
+            if missing_outputs:
+                missing = sorted(missing_outputs)
+                return False, (
+                    f"BT did not write required output blackboard key(s): {missing}. "
+                    f"Map node output ports to these exact keys."
+                )
+
+            loop_controls = {'RetryUntilSuccessful', 'Repeat'}
+            has_loop = any(
+                isinstance(elem.tag, str) and elem.tag in loop_controls
+                for elem in root.iter()
+            )
+
+            retry_nodes = [
+                elem for elem in root.iter()
+                if isinstance(elem.tag, str) and elem.tag == 'RetryUntilSuccessful'
+            ]
+            retry_control_allowed = (
+                recovery_policy.get('required', False) or
+                recovery_policy.get('loop_required', False)
+            )
+
+            if not retry_control_allowed and retry_nodes:
+                return False, (
+                    "Objective recovery_policy has required=false and loop_until_success=false, "
+                    "so BT must not use RetryUntilSuccessful for this step."
+                )
+
+            expected_retry_attempts = recovery_policy.get('retry_attempts', None)
+            if retry_control_allowed and expected_retry_attempts is not None:
+                if not retry_nodes:
+                    return False, (
+                        "Objective recovery_policy.retry_attempts is set for a retry-enabled step, but BT has no RetryUntilSuccessful node. "
+                        "Use RetryUntilSuccessful with num_attempts matching recovery_policy.retry_attempts."
+                    )
+
+                has_expected_retry = False
+                for retry_node in retry_nodes:
+                    raw_num = str(retry_node.attrib.get('num_attempts', '')).strip()
+                    try:
+                        current = int(raw_num)
+                    except ValueError:
+                        continue
+
+                    if expected_retry_attempts == 'forever' and current == -1:
+                        has_expected_retry = True
+                        break
+                    if isinstance(expected_retry_attempts, int) and current == expected_retry_attempts:
+                        has_expected_retry = True
+                        break
+
+                if not has_expected_retry:
+                    expected_value = '-1' if expected_retry_attempts == 'forever' else str(expected_retry_attempts)
+                    return False, (
+                        "Objective recovery_policy.retry_attempts requires "
+                        f"RetryUntilSuccessful num_attempts=\"{expected_value}\", "
+                        "but BT uses a different value."
+                    )
+
+            # Recoverable-check policy is enforced ONLY when explicitly declared
+            # via objective.recovery_policy.required (no keyword heuristics).
+            if recovery_policy.get('required', False):
+                condition_tags = {
+                    name for name, spec in node_specs.items()
+                    if spec.get('type') == 'condition'
+                }
+                condition_nodes = [
+                    elem for elem in root.iter()
+                    if isinstance(elem.tag, str) and elem.tag in condition_tags
+                ]
+
+                if condition_nodes:
+                    if recovery_policy.get('loop_required', False) and not has_loop:
+                        return False, (
+                            "Objective recovery_policy requires loop_until_success, but BT has no retry loop control. "
+                            "Wrap check+recovery logic with RetryUntilSuccessful (or Repeat)."
+                        )
+
+                    branching_controls = {'Fallback', 'ReactiveFallback'}
+
+                    def has_branching_ancestor(node):
+                        parent = parent_map.get(node)
+                        while parent is not None:
+                            if isinstance(parent.tag, str) and parent.tag in branching_controls:
+                                return True
+                            parent = parent_map.get(parent)
+                        return False
+
+                    for cond in condition_nodes:
+                        if not has_branching_ancestor(cond):
+                            return False, (
+                                f"Recovery branch missing for condition <{cond.tag}>. "
+                                "For recoverable checks, place conditions under Fallback/ReactiveFallback "
+                                "with an explicit failure-recovery branch."
+                            )
             
             return True, "OK"
         except Exception as e:
@@ -526,7 +932,12 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            # Launch may have already shut down the global context.
+            pass
 
 if __name__ == '__main__':
     main()
