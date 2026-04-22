@@ -9,3 +9,4 @@ objectives/*.txt
 objectives/*.yaml
 !objectives/example.txt
 !objectives/example.yaml
+/*/__pycache__/
