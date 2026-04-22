@@ -20,6 +20,7 @@ install(PROGRAMS
   llm_bt_builder/bt_agent_node.py
   llm_bt_builder/bt_client_node.py
   llm_bt_builder/bt_rag_agent_node.py
+  llm_bt_builder/mcp_bt_rag_agent_node.py
   llm_bt_builder/bt_rag_agentic_node.py
   DESTINATION lib/${PROJECT_NAME}
 )

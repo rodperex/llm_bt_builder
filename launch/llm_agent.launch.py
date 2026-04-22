@@ -80,7 +80,31 @@ def generate_launch_description():
     agent_type_arg = DeclareLaunchArgument(
         'agent_type',
         default_value='rag',
-        description='Agent type: "rag" for RAG agent, "normal" for standard agent, "agentic" for tool-calling agent'
+        description='Agent type: "rag", "mcp_rag", "normal", or "agentic"'
+    )
+
+    mcp_enabled_arg = DeclareLaunchArgument(
+        'mcp_enabled',
+        default_value='false',
+        description='Enable MCP context enrichment (used by mcp_rag).'
+    )
+
+    mcp_cmd_arg = DeclareLaunchArgument(
+        'mcp_cmd',
+        default_value='ros2 run mcp_context_server mcp_context_server',
+        description='Command used to start the MCP server.'
+    )
+
+    mcp_timeout_arg = DeclareLaunchArgument(
+        'mcp_timeout_sec',
+        default_value='2.0',
+        description='Timeout for MCP calls in seconds.'
+    )
+
+    mcp_fail_open_arg = DeclareLaunchArgument(
+        'mcp_fail_open',
+        default_value='true',
+        description='If true, continue without MCP on failure.'
     )
 
     prompt_file_arg = DeclareLaunchArgument(
@@ -106,6 +130,30 @@ def generate_launch_description():
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'rag'"])
+        )
+    )
+
+    # MCP-enhanced RAG node (A/B against bt_rag_agent_node)
+    mcp_rag_node = Node(
+        package='llm_bt_builder',
+        executable='mcp_bt_rag_agent_node.py',
+        name='mcp_llm_rag_bt_agent',
+        output='screen',
+        emulate_tty=True,
+        parameters=[{
+            'llm_provider': LaunchConfiguration('provider'),
+            'model_id': LaunchConfiguration('model'),
+            'execution_mode': LaunchConfiguration('mode'),
+            'api_url': LaunchConfiguration('url'),
+            'api_key': LaunchConfiguration('key'),
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'mcp_enabled': LaunchConfiguration('mcp_enabled'),
+            'mcp_cmd': LaunchConfiguration('mcp_cmd'),
+            'mcp_timeout_sec': LaunchConfiguration('mcp_timeout_sec'),
+            'mcp_fail_open': LaunchConfiguration('mcp_fail_open'),
+        }],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'mcp_rag'"])
         )
     )
 
@@ -156,7 +204,12 @@ def generate_launch_description():
         key_arg,
         agent_type_arg,
         prompt_file_arg,
+        mcp_enabled_arg,
+        mcp_cmd_arg,
+        mcp_timeout_arg,
+        mcp_fail_open_arg,
         rag_node,
+        mcp_rag_node,
         normal_node,
         agentic_node,
     ])
