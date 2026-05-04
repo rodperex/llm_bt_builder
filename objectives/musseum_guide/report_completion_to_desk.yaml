@@ -1,0 +1,15 @@
+objective:
+  name: "report_completion_to_desk"
+  description: "A service robot acting as a guide in a museum. Overall goal: Find a lost visitor, ask them what exhibit they are looking for, escort them to that exhibit, and report back to the information desk. In this step: After confirming arrival with the visitor, the robot must return alone to the information desk and report that assistance is complete."
+  recovery_policy:
+    required: false
+    loop_until_success: false
+    retry_attempts: 3
+  steps:
+    - step: "Navigate to a named location: entrance_hall"
+    - step: "Turn towards the desk staff before speaking"
+    - step: "Speak using text-to-speech: 'I have successfully escorted the visitor to their exhibit.'"
+  style:
+    - informative
+    - professional
+

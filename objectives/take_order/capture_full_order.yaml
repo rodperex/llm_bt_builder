@@ -1,0 +1,24 @@
+objective:
+  name: "capture_full_order"
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must ask the customer for their full order and capture the first dish, second dish, and drink."
+  outputs:
+    - first_dish
+    - second_dish
+    - drink
+  recovery_policy:
+    required: false
+    loop_until_success: false
+    retry_attempts: 3
+  steps:
+    - step: "Ask an open-ended question and capture the answer"
+    - step: "Extract semantic information fields from free text using LLM (names, items, intents)"
+  constraints:
+    max_response_time: 60
+  style:
+    - clear
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available locations are:
+    - main_kitchen
+    - bar

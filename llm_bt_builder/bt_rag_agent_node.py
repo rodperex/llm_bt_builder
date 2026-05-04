@@ -48,11 +48,13 @@ class RagBTAgent(Node):
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
         self.declare_parameter('prompt_file', 'system_prompt.txt')
+        self.declare_parameter('embeddings_device', 'cpu')
 
         self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.model_id = self.get_parameter('model_id').value
         self.api_url = self.get_parameter('api_url').value
         self.api_key = self.get_parameter('api_key').value
+        self.embeddings_device = str(self.get_parameter('embeddings_device').value).strip().lower()
 
         # API key detection based on provider
         param_key = self.get_parameter('api_key').value
@@ -229,7 +231,26 @@ class RagBTAgent(Node):
 
     def setup_embeddings(self):
         self.get_logger().info("📥 Loading Embeddings (HuggingFace)...")
-        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+        requested_device = self.embeddings_device if self.embeddings_device else 'cpu'
+        if requested_device == 'auto':
+            requested_device = 'cpu'
+
+        try:
+            self.get_logger().info(f"📥 Embeddings device: {requested_device}")
+            return HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs={"device": requested_device},
+            )
+        except Exception as e:
+            if requested_device != 'cpu':
+                self.get_logger().warn(
+                    f"Embeddings initialization failed on '{requested_device}' ({e}). Falling back to CPU.")
+                return HuggingFaceEmbeddings(
+                    model_name="all-MiniLM-L6-v2",
+                    model_kwargs={"device": "cpu"},
+                )
+            raise
 
     def _load_bt_nodes_yaml(self, filename):
         """Load BT.CPP standard nodes from YAML file"""
@@ -320,6 +341,7 @@ class RagBTAgent(Node):
                 required_inputs = []
                 input_ports = set()
                 output_ports = set()
+                return_statuses = set()
                 if raw_ports:
                     for p in raw_ports:
                         p_name = p.get('key') or p.get('name')
@@ -338,12 +360,19 @@ class RagBTAgent(Node):
                         if direction == 'input' and 'required' in description:
                             required_inputs.append(p_name)
 
+                raw_returns = node.get('return', {})
+                if isinstance(raw_returns, dict):
+                    for status_name in raw_returns.keys():
+                        if isinstance(status_name, str):
+                            return_statuses.add(status_name.strip().upper())
+
                 specs[node['name']] = {
                     'ports': current_ports,
                     'required_inputs': required_inputs,
                     'input_ports': input_ports,
                     'output_ports': output_ports,
                     'type': str(node.get('type', '')).strip().lower(),
+                    'return_statuses': return_statuses,
                 }
             return specs
         except: return {}
@@ -637,6 +666,20 @@ class RagBTAgent(Node):
                             "This step is not a recovery-loop step. Remove RetryUntilSuccessful and keep a plain Sequence "
                             "unless objective.recovery_policy.required=true or loop_until_success=true."
                         )
+                    elif "can only return RUNNING" in bt_msg and "<Sequence>" in bt_msg:
+                        repair_hint = (
+                            "A node that only returns RUNNING cannot appear before required later siblings "
+                            "inside a plain Sequence. Reorder so it is last, or wrap with ReactiveSequence/ReactiveFallback "
+                            "so downstream checks/actions keep being ticked."
+                        )
+                    elif "can only return RUNNING" in bt_msg and "<ReactiveSequence>" in bt_msg:
+                        repair_hint = (
+                            "A node that only returns RUNNING inside a ReactiveSequence blocks all following siblings. "
+                            "ReactiveSequence stops at the first RUNNING child and does not advance further. "
+                            "If you want to keep ticking a condition while an action runs, use "
+                            "ReactiveFallback with the condition FIRST: "
+                            "<ReactiveFallback> <IsCondition/> <LongRunningAction/> </ReactiveFallback>."
+                        )
 
                     if bt_msg == last_semantic_error:
                         repeated_semantic_error_count += 1
@@ -918,7 +961,30 @@ class RagBTAgent(Node):
                                 "For recoverable checks, place conditions under Fallback/ReactiveFallback "
                                 "with an explicit failure-recovery branch."
                             )
-            
+
+            # Progress-safety check: an always-RUNNING leaf in ordered short-circuit controls
+            # blocks later siblings from being ticked.
+            # ReactiveSequence is included: it also stops advancing past a RUNNING child.
+            blocking_controls = ('Sequence', 'Fallback', 'ReactiveSequence')
+            for control_tag in blocking_controls:
+                for control in root.iter(control_tag):
+                    children = [c for c in list(control) if isinstance(c.tag, str)]
+                    for child in children[:-1]:
+                        # Only leaf capability nodes are checked here; control/decorator nodes
+                        # require deeper control-flow analysis and are handled by prompt guidance.
+                        if child.tag in self.structural_nodes:
+                            continue
+                        spec = node_specs.get(child.tag)
+                        if not spec:
+                            continue
+                        statuses = set(spec.get('return_statuses', set()))
+                        if statuses == {'RUNNING'}:
+                            return False, (
+                                f"Node <{child.tag}> can only return RUNNING and appears before other "
+                                f"children inside <{control_tag}>, so later nodes are unreachable. "
+                                "Move it to the end of that control node or redesign with non-blocking flow."
+                            )
+
             return True, "OK"
         except Exception as e:
             return False, str(e)

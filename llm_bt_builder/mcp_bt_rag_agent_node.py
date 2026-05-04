@@ -24,7 +24,6 @@ import sys
 import difflib
 
 import rclpy
-
 try:
     from llm_bt_builder.bt_rag_agent_node import RagBTAgent, Document, Chroma
 except ModuleNotFoundError:
@@ -93,7 +92,11 @@ class StdioMCPClient:
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("MCP server closed stdout")
-            msg = json.loads(line)
+            stripped = line.strip()
+            if not stripped.startswith('{'):
+                # Non-JSON line (e.g. ros2 run startup banners, warnings).
+                continue
+            msg = json.loads(stripped)
             if msg.get("id") != req_id:
                 continue
             if "error" in msg:

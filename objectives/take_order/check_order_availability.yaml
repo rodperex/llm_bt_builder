@@ -1,0 +1,28 @@
+objective:
+  name: "check_order_availability"
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must verify the availability of the ordered items against the internal list and confirm with the customer."
+  inputs:
+    - first_dish
+    - second_dish
+    - drink
+  outputs:
+    - order_confirmed
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+  steps:
+    - step: "Check whether requested items are available against a provided availability list"
+    - step: "Ask a yes/no confirmation question and capture the result"
+    - step: "If unavailable, apologize and ask for a new order"
+    - step: "Capture new order and update blackboard keys"
+  constraints:
+    max_confirmation_attempts: 5
+  style:
+    - apologetic
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available locations are:
+    - main_kitchen
+    - bar

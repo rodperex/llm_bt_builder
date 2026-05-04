@@ -79,13 +79,13 @@ def generate_launch_description():
 
     agent_type_arg = DeclareLaunchArgument(
         'agent_type',
-        default_value='rag',
+        default_value='mcp_rag',
         description='Agent type: "rag", "mcp_rag", "normal", or "agentic"'
     )
 
     mcp_enabled_arg = DeclareLaunchArgument(
         'mcp_enabled',
-        default_value='false',
+        default_value='true',
         description='Enable MCP context enrichment (used by mcp_rag).'
     )
 
@@ -107,10 +107,34 @@ def generate_launch_description():
         description='If true, continue without MCP on failure.'
     )
 
+    use_episodic_mem_arg = DeclareLaunchArgument(
+        'use_episodic_mem',
+        default_value='false',
+        description='Enable episodic memory RAG retrieval for MCP BT agent.'
+    )
+
+    episodic_mem_pool_size_arg = DeclareLaunchArgument(
+        'episodic_mem_pool_size',
+        default_value='100',
+        description='Max episodic memories fetched before retrieval.'
+    )
+
+    episodic_mem_top_k_arg = DeclareLaunchArgument(
+        'episodic_mem_top_k',
+        default_value='5',
+        description='Top-k episodic memories injected into prompt context.'
+    )
+
     prompt_file_arg = DeclareLaunchArgument(
         'prompt_file',
-        default_value='system_prompt.txt',
+        default_value='mcp_system_prompt.txt',
         description='Prompt file name in prompts/ directory (e.g., system_prompt.txt)'
+    )
+
+    embeddings_device_arg = DeclareLaunchArgument(
+        'embeddings_device',
+        default_value='cpu',
+        description='Device for HuggingFace embeddings: cpu, cuda, or auto.'
     )
 
     # RAG node
@@ -126,7 +150,8 @@ def generate_launch_description():
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
-            'prompt_file': LaunchConfiguration('prompt_file')
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'embeddings_device': LaunchConfiguration('embeddings_device')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'rag'"])
@@ -147,10 +172,14 @@ def generate_launch_description():
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
             'prompt_file': LaunchConfiguration('prompt_file'),
+            'embeddings_device': LaunchConfiguration('embeddings_device'),
             'mcp_enabled': LaunchConfiguration('mcp_enabled'),
             'mcp_cmd': LaunchConfiguration('mcp_cmd'),
             'mcp_timeout_sec': LaunchConfiguration('mcp_timeout_sec'),
             'mcp_fail_open': LaunchConfiguration('mcp_fail_open'),
+            'use_episodic_mem': LaunchConfiguration('use_episodic_mem'),
+            'episodic_mem_pool_size': LaunchConfiguration('episodic_mem_pool_size'),
+            'episodic_mem_top_k': LaunchConfiguration('episodic_mem_top_k'),
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'mcp_rag'"])
@@ -204,10 +233,14 @@ def generate_launch_description():
         key_arg,
         agent_type_arg,
         prompt_file_arg,
+        embeddings_device_arg,
         mcp_enabled_arg,
         mcp_cmd_arg,
         mcp_timeout_arg,
         mcp_fail_open_arg,
+        use_episodic_mem_arg,
+        episodic_mem_pool_size_arg,
+        episodic_mem_top_k_arg,
         rag_node,
         mcp_rag_node,
         normal_node,
