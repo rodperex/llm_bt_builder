@@ -113,14 +113,25 @@ You can define custom robot capabilities in the YAML files:
 
 ### ROS 2 Service
 
-Both agent nodes expose the `generate_bt` service:
+Available services by node type:
+
+| Node | `/generate_bt` (`GenerateBT`) | `/fix_bt` (`FixBT`) |
+|---|---|---|
+| `bt_agent_node.py` (normal) | Yes | No |
+| `bt_rag_agent_node.py` (rag) | Yes | Yes |
+| `bt_rag_agentic_node.py` (agentic) | Yes | Yes |
+| `mcp_bt_rag_agent_node.py` (mcp-rag) | Yes (inherited) | Yes (inherited) |
+
+`GenerateBT` request/response:
 - **Request:**
-  - `objective`: Objective in natural language (string)
+  - `objective`: Objective in YAML-like natural language/structured text (string)
   - `bt_nodes_yaml`: YAML string with robot capability node definitions
 - **Response:**
   - `success`: Whether generation was successful (bool)
   - `bt_xml`: Generated Behavior Tree in XML format (string)
   - `message`: Status message or model identifier (string)
+
+`FixBT` is used by RAG/agentic nodes to regenerate XML from a broken BT plus an explicit error message.
 
 **Direct service call example:**
 ```bash
@@ -135,6 +146,46 @@ The client node simplifies the workflow by:
 - Saving the generated XML with the objective as a comment header
 
 See the "Launch Client Node" section above for usage examples.
+
+## Objective Contract (from llm_planner)
+
+`llm_bt_builder` expects each objective to be self-contained. At minimum:
+- `description`
+- optional `inputs` and `outputs`
+- `recovery_policy`
+- `steps`
+
+`recovery_policy` schema:
+
+```yaml
+recovery_policy:
+  required: true|false
+  loop_until_success: true|false
+  retry_attempts: int|forever
+```
+
+Semantics enforced during validation:
+- If `required=false` and `loop_until_success=false`, `RetryUntilSuccessful` is not allowed.
+- If `retry_attempts` is set and retry is allowed, `RetryUntilSuccessful num_attempts` must match exactly.
+- If `required=true`, condition checks must be inside an explicit branching recovery structure (`Fallback` or `ReactiveFallback`).
+
+This contract is parsed from `objective` in:
+- `bt_rag_agent_node.py`
+- `bt_agent_node.py`
+- `bt_rag_agentic_node.py`
+
+If the policy and BT structure conflict, generation is rejected with actionable validation feedback.
+
+## End-to-End With llm_planner
+
+Pipeline summary:
+1. `llm_planner` creates plan steps and writes `objective.recovery_policy`.
+2. `llm_bt_builder` generates BT XML per step.
+3. Semantic validation checks node/port correctness and policy consistency.
+4. On failure, RAG/agentic modes retry with targeted feedback (and `fix_bt` when applicable).
+
+Debugging tip:
+- If XML shape looks wrong, inspect the source step objective first. Many "bad BT" outcomes come from inconsistent `recovery_policy` in the plan.
 
 ## Robot Capabilities YAML Format
 
