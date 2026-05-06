@@ -1,0 +1,36 @@
+objective:
+  name: "surveillance_follow_person"
+  description: "A security surveillance robot monitors a public indoor area. In this step, it must detect one person, announce that tracking has started, and continue following the person safely while visual contact is maintained. The robot must keep orientation toward the person, preserve a safe following distance, advance when the person is farther than the configured minimum distance, hold position when already close enough, and if the person is lost, resume search and reacquire the target. If at some point the robot is required to stop this task, it should immediately halt the follow behavior and navigate back to the base."
+  outputs:
+    - tracked_person_frame
+
+  steps:
+    - step: "Set the perception system to search for a specific target class"
+    - step: "Search for a person while no target is currently detected"
+    - step: "When a person is detected, store the detected TF frame in tracked_person_frame"
+    - step: "Announce once that following has started"
+    - step: "Continuously track the person position and orientation"
+    - step: "Keep the robot facing the tracked person before advancing"
+    - step: "Advance only when the tracked person is farther than a provided minimum distance threshold"
+    - step: "When the tracked person is within the minimum distance threshold, hold position while maintaining orientation"
+    - step: "If the tracked person is lost, return to search behavior and reacquire"
+    - step: "If an external stop signal is received, immediately halt the follow behavior and navigate back to the base"
+
+  constraints:
+    max_search_duration: 45
+    follow_min_distance_m: 1.2
+
+  style:
+    - calm
+    - alert
+    - concise
+
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+
+useful_info: |
+  Available locations are:
+    - robot_home
+

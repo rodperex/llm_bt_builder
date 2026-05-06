@@ -1,0 +1,7 @@
+blackboard:
+  detected_customer: table_5_customer
+  customer_name: alex
+  visit_reason: place_order
+  first_dish: pizza
+  second_dish: salad
+  drink: water

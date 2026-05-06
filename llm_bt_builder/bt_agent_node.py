@@ -23,8 +23,12 @@ import os
 import time
 from ament_index_python.packages import get_package_share_directory
 from llm_bt_builder.srv import GenerateBT
+try:
+    from llm_bt_builder.bt_validation import BTValidation
+except ModuleNotFoundError:
+    from bt_validation import BTValidation
 
-class BTAgentNode(Node):
+class BTAgentNode(BTValidation, Node):
     def __init__(self):
         super().__init__('llm_bt_agent')
 
@@ -79,12 +83,14 @@ class BTAgentNode(Node):
         self.decorators = self._extract_node_names(self.bt_decorator_nodes_yaml)
         
         # Special nodes that don't require validation
-        self.special_nodes = ['root', 'BehaviorTree', 'Blackboard', 'SetBlackboard', 'Wait',
-                              'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+        self.special_nodes = ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
         
         # All structural nodes (for semantic validation skip)
         self.structural_nodes = set(
             self.decorators + self.control_nodes + self.special_nodes
+        )
+        self.structural_required_ports = self._parse_structural_required_ports(
+            self.bt_decorator_nodes_yaml, self.bt_control_nodes_yaml
         )
 
         # Local initialization (Omitted for brevity, same as before)
@@ -198,41 +204,13 @@ class BTAgentNode(Node):
 
         self.get_logger().info(f"🎯 Objective: '{request.objective}'")
         recovery_policy = self._extract_recovery_policy(request.objective)
-        
-        node_specs = {}
-        try:
-            robot_caps = yaml.safe_load(request.bt_nodes_yaml)
-            for node in robot_caps['bt_nodes']:
-                current_ports = []
-                return_statuses = set()
-                # Get the list of ports (or empty list if none)
-                raw_ports = node.get('ports', [])
-                
-                if raw_ports:
-                    for p in raw_ports:
-                        p_name = p.get('key') or p.get('name')
-                        
-                        if p_name:
-                            current_ports.append(p_name)
-                        else:
-                            # If a port has neither key nor name, ignore but warn
-                            self.get_logger().warn(f"Unnamed port in node {node['name']}")
-
-                raw_returns = node.get('return', {})
-                if isinstance(raw_returns, dict):
-                    for status_name in raw_returns.keys():
-                        if isinstance(status_name, str):
-                            return_statuses.add(status_name.strip().upper())
-
-                node_specs[node['name']] = {
-                    'ports': current_ports,
-                    'return_statuses': return_statuses,
-                    'type': str(node.get('type', '')).strip().lower(),
-                }
-                
-        except Exception as e:
-            self.get_logger().error(f"❌ Error processing YAML: {e}")
-            response.success = False; response.message = f"YAML Error: {e}"; return response
+        node_specs = self._parse_capability_specs(request.bt_nodes_yaml)
+        known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        required_output_vars = self._extract_required_output_vars(request.objective)
+        if not node_specs:
+            response.success = False
+            response.message = "YAML Error: Could not parse BT node capabilities"
+            return response
 
         # Load template
         template = self.load_prompt_template()
@@ -294,6 +272,8 @@ class BTAgentNode(Node):
             is_bt_valid, semantic_msg = self.validate_bt_semantics(
                 xml_result,
                 node_specs,
+                known_bb_vars,
+                required_output_vars,
                 recovery_policy,
             )
 
@@ -322,174 +302,16 @@ class BTAgentNode(Node):
             return False, str(e)
 
     def validate_xml_bt(self, root):
-        """Step 2: Validate BehaviorTree structural rules (decorators have 1 child, control nodes have children, etc.)"""
-        try:
-            for elem in root.iter():
-                children = list(elem)
-                
-                # Skip text/comments
-                if not isinstance(elem.tag, str):
-                    continue
-                
-                # Root and BehaviorTree should have exactly 1 child
-                if elem.tag in ['root', 'BehaviorTree']:
-                    if len(children) != 1:
-                        return False, f"<{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Decorators must have exactly 1 child
-                elif elem.tag in self.decorators:
-                    if len(children) != 1:
-                        return False, f"Decorator <{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Control nodes must have at least 1 child
-                elif elem.tag in self.control_nodes:
-                    if len(children) < 1:
-                        return False, f"Control node <{elem.tag}> must have at least 1 child, found {len(children)}"
-                
-                # AlwaysSuccess/AlwaysFailure should have 0 children
-                elif elem.tag in ['AlwaysSuccess', 'AlwaysFailure']:
-                    if len(children) > 0:
-                        return False, f"<{elem.tag}> should not have children, found {len(children)}"
-            
-            return True, "OK"
-        except Exception as e:
-            return False, str(e)
+        return super().validate_xml_bt(root)
 
-    def validate_bt_semantics(self, root, node_specs, recovery_policy=None):
-        """Step 3: Check if custom nodes exist in YAML and ports are correct."""
-        # Note: Structural validation is done in validate_xml_bt
-        recovery_policy = recovery_policy or {'required': False, 'loop_required': False, 'retry_attempts': None}
-        parent_map = {child: parent for parent in root.iter() for child in list(parent)}
-        
-        # Structural attributes allowed in any node
-        ignored_attrs = ['ID', 'name', 'num_attempts', 'server_name', 'server_timeout', 'path', '_success', '_failure'] 
-
-        for elem in root.iter():
-            # Skip structural BT.CPP nodes (using set for O(1) lookup)
-            if elem.tag in self.structural_nodes:
-                continue
-            
-            # 1. Node name check - must exist in YAML capabilities
-            if elem.tag not in node_specs:
-                return False, f"Node NOT allowed: <{elem.tag}>. Not in your skill list."
-            
-            # 2. Port check (attributes)
-            allowed_ports = node_specs[elem.tag].get('ports', [])
-            for attr in elem.attrib:
-                if attr in ignored_attrs: continue
-                
-                if attr not in allowed_ports:
-                    return False, f"Node <{elem.tag}> has an invented port: '{attr}'. Valid ports: {allowed_ports}"
-
-        # 3. Progress-safety: always-RUNNING leaves before siblings block ordered
-        # short-circuit controls from reaching later children.
-        # ReactiveSequence is included: it also stops advancing past a RUNNING child.
-        blocking_controls = ('Sequence', 'Fallback', 'ReactiveSequence')
-        for control_tag in blocking_controls:
-            for control in root.iter(control_tag):
-                children = [c for c in list(control) if isinstance(c.tag, str)]
-                for child in children[:-1]:
-                    if child.tag in self.structural_nodes:
-                        continue
-                    spec = node_specs.get(child.tag)
-                    if not spec:
-                        continue
-                    statuses = set(spec.get('return_statuses', set()))
-                    if statuses == {'RUNNING'}:
-                        return False, (
-                            f"Node <{child.tag}> can only return RUNNING and appears before other "
-                            f"children inside <{control_tag}>, so later nodes are unreachable."
-                        )
-
-        # 4. Recovery policy checks are enforced only when explicitly declared.
-        loop_controls = {'RetryUntilSuccessful', 'Repeat'}
-        has_loop = any(
-            isinstance(elem.tag, str) and elem.tag in loop_controls
-            for elem in root.iter()
+    def validate_bt_semantics(self, root, node_specs, known_bb_vars=None, required_outputs=None, recovery_policy=None):
+        return super().validate_bt_semantics(
+            root,
+            node_specs,
+            known_bb_vars,
+            required_outputs,
+            recovery_policy,
         )
-
-        retry_nodes = [
-            elem for elem in root.iter()
-            if isinstance(elem.tag, str) and elem.tag == 'RetryUntilSuccessful'
-        ]
-        retry_control_allowed = (
-            recovery_policy.get('required', False) or
-            recovery_policy.get('loop_required', False)
-        )
-
-        if not retry_control_allowed and retry_nodes:
-            return False, (
-                "Objective recovery_policy has required=false and loop_until_success=false, "
-                "so BT must not use RetryUntilSuccessful for this step."
-            )
-
-        expected_retry_attempts = recovery_policy.get('retry_attempts', None)
-        if retry_control_allowed and expected_retry_attempts is not None:
-            if not retry_nodes:
-                return False, (
-                    "Objective recovery_policy.retry_attempts is set for a retry-enabled step, but BT has no RetryUntilSuccessful node. "
-                    "Use RetryUntilSuccessful with num_attempts matching recovery_policy.retry_attempts."
-                )
-
-            has_expected_retry = False
-            for retry_node in retry_nodes:
-                raw_num = str(retry_node.attrib.get('num_attempts', '')).strip()
-                try:
-                    current = int(raw_num)
-                except ValueError:
-                    continue
-
-                if expected_retry_attempts == 'forever' and current == -1:
-                    has_expected_retry = True
-                    break
-                if isinstance(expected_retry_attempts, int) and current == expected_retry_attempts:
-                    has_expected_retry = True
-                    break
-
-            if not has_expected_retry:
-                expected_value = '-1' if expected_retry_attempts == 'forever' else str(expected_retry_attempts)
-                return False, (
-                    "Objective recovery_policy.retry_attempts requires "
-                    f"RetryUntilSuccessful num_attempts=\"{expected_value}\", "
-                    "but BT uses a different value."
-                )
-
-        if recovery_policy.get('required', False):
-            condition_tags = {
-                name for name, spec in node_specs.items()
-                if spec.get('type') == 'condition'
-            }
-            condition_nodes = [
-                elem for elem in root.iter()
-                if isinstance(elem.tag, str) and elem.tag in condition_tags
-            ]
-
-            if condition_nodes:
-                if recovery_policy.get('loop_required', False) and not has_loop:
-                    return False, (
-                        "Objective recovery_policy requires loop_until_success, but BT has no retry loop control. "
-                        "Wrap check+recovery logic with RetryUntilSuccessful (or Repeat)."
-                    )
-
-                branching_controls = {'Fallback', 'ReactiveFallback'}
-
-                def has_branching_ancestor(node):
-                    parent = parent_map.get(node)
-                    while parent is not None:
-                        if isinstance(parent.tag, str) and parent.tag in branching_controls:
-                            return True
-                        parent = parent_map.get(parent)
-                    return False
-
-                for cond in condition_nodes:
-                    if not has_branching_ancestor(cond):
-                        return False, (
-                            f"Recovery branch missing for condition <{cond.tag}>. "
-                            "For recoverable checks, place conditions under Fallback/ReactiveFallback "
-                            "with an explicit failure-recovery branch."
-                        )
-
-        return True, "OK"
 
     def call_llm(self, messages):
         TIMEOUT_SEC = 180.0

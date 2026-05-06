@@ -22,6 +22,10 @@ import re
 import os
 import time
 import xml.etree.ElementTree as ET
+try:
+    from llm_bt_builder.bt_validation import BTValidation
+except ModuleNotFoundError:
+    from bt_validation import BTValidation
 
 # --- LANGCHAIN & RAG IMPORTS ---
 try:
@@ -37,7 +41,7 @@ except ImportError as e:
     print("❌ ERROR: Missing libraries. Please install requirements.txt and ensure all dependencies are met.")
     raise e
 
-class RagBTAgent(Node):
+class RagBTAgent(BTValidation, Node):
     def __init__(self):
         super().__init__('llm_bt_rag_agent')
         self.get_logger().info(f"🛠️ Starting RAG Node...")
@@ -283,20 +287,7 @@ class RagBTAgent(Node):
             return []
 
     def _parse_structural_required_ports(self, *yaml_contents):
-        """Extract required port names for each structural (control/decorator) node."""
-        required = {}
-        for content in yaml_contents:
-            try:
-                data = yaml.safe_load(content)
-                for node in data.get('bt_nodes', []):
-                    ports = node.get('ports', []) or []
-                    req = [p.get('name') or p.get('key')
-                           for p in ports if p.get('name') or p.get('key')]
-                    if req:
-                        required[node['name']] = req
-            except Exception:
-                pass
-        return required
+        return super()._parse_structural_required_ports(*yaml_contents)
 
     def load_prompt_template(self):
         try:
@@ -331,51 +322,7 @@ class RagBTAgent(Node):
             return None
 
     def parse_full_specs(self, yaml_content):
-        # Extract ALL valid nodes from the original YAML for final validation
-        specs = {}
-        try:
-            data = yaml.safe_load(yaml_content)
-            for node in data.get('bt_nodes', []):
-                raw_ports = node.get('ports', [])
-                current_ports = []
-                required_inputs = []
-                input_ports = set()
-                output_ports = set()
-                return_statuses = set()
-                if raw_ports:
-                    for p in raw_ports:
-                        p_name = p.get('key') or p.get('name')
-                        if not p_name:
-                            continue
-                        current_ports.append(p_name)
-
-                        # Infer required input ports from node description metadata.
-                        direction = str(p.get('direction', '')).lower()
-                        description = str(p.get('description', '')).lower()
-                        if direction == 'input':
-                            input_ports.add(p_name)
-                        elif direction == 'output':
-                            output_ports.add(p_name)
-
-                        if direction == 'input' and 'required' in description:
-                            required_inputs.append(p_name)
-
-                raw_returns = node.get('return', {})
-                if isinstance(raw_returns, dict):
-                    for status_name in raw_returns.keys():
-                        if isinstance(status_name, str):
-                            return_statuses.add(status_name.strip().upper())
-
-                specs[node['name']] = {
-                    'ports': current_ports,
-                    'required_inputs': required_inputs,
-                    'input_ports': input_ports,
-                    'output_ports': output_ports,
-                    'type': str(node.get('type', '')).strip().lower(),
-                    'return_statuses': return_statuses,
-                }
-            return specs
-        except: return {}
+        return self._parse_capability_specs(yaml_content)
 
     def _extract_known_blackboard_vars(self, objective_text):
         """Collect blackboard vars that are readable at step start."""
@@ -565,6 +512,8 @@ class RagBTAgent(Node):
         # 4. RETRY LOOP 🔄
         last_semantic_error = ""
         repeated_semantic_error_count = 0
+        last_structure_error = ""
+        repeated_structure_error_count = 0
         for attempt in range(MAX_RETRIES):
             self.get_logger().info(f"Attempt {attempt + 1}/{MAX_RETRIES}...")
 
@@ -603,8 +552,97 @@ class RagBTAgent(Node):
                 is_valid_structure, struct_msg = self.validate_xml_bt(xml_str)
                 if not is_valid_structure:
                     self.get_logger().warn(f"⚠️ BT Structure Error: {struct_msg}")
+                    repair_hint = (
+                        "Return a COMPLETE XML from scratch. "
+                        "Do not emit empty structural nodes. "
+                        "Every control node must have the required minimum children, "
+                        "every decorator must wrap exactly one child, "
+                        "and root/BehaviorTree arity constraints must be satisfied. "
+                        "Never use self-closing structural tags for control/decorator nodes."
+                    )
+
+                    decorator_match = re.search(
+                        r"Decorator <([^>]+)> must have exactly (\d+) child(?:ren)?, found (\d+)",
+                        struct_msg,
+                    )
+                    control_match = re.search(
+                        r"Control node <([^>]+)> must have at least (\d+) child(?:ren)?, found (\d+)",
+                        struct_msg,
+                    )
+                    root_match = re.search(
+                        r"<(root|BehaviorTree)> must have exactly (\d+) child(?:ren)?, found (\d+)",
+                        struct_msg,
+                    )
+                    zero_child_match = re.search(
+                        r"<([^>]+)> should not have children, found (\d+)",
+                        struct_msg,
+                    )
+                    req_attr_match = re.search(
+                        r"<([^>]+)> is missing required attribute '([^']+)'",
+                        struct_msg,
+                    )
+
+                    if decorator_match:
+                        tag, required, found = decorator_match.groups()
+                        repair_hint = (
+                            f"Decorator <{tag}> requires exactly {required} child, but found {found}. "
+                            f"Wrap one valid subtree inside <{tag}> ... </{tag}>. "
+                            f"Never output <{tag}/> or <{tag}></{tag}>."
+                        )
+                    elif control_match:
+                        tag, required, found = control_match.groups()
+                        repair_hint = (
+                            f"Control node <{tag}> requires at least {required} child, but found {found}. "
+                            f"Add valid child nodes inside <{tag}> ... </{tag}> or remove that wrapper if unnecessary. "
+                            f"Never output <{tag}/> or <{tag}></{tag}>."
+                        )
+                    elif root_match:
+                        tag, required, found = root_match.groups()
+                        repair_hint = (
+                            f"<{tag}> requires exactly {required} child, but found {found}. "
+                            "Rebuild the top skeleton as <root><BehaviorTree ID=\"MainTree\"> ... </BehaviorTree></root> "
+                            "with exactly one child at each structural root level."
+                        )
+                    elif zero_child_match:
+                        tag, found = zero_child_match.groups()
+                        repair_hint = (
+                            f"<{tag}> must be a leaf structural wrapper with no children, but found {found}. "
+                            f"Remove all children from <{tag}> and keep it as an empty wrapper tag only if allowed by BT.CPP."
+                        )
+                    elif req_attr_match:
+                        tag, attr = req_attr_match.groups()
+                        repair_hint = (
+                            f"<{tag}> is missing required attribute '{attr}'. "
+                            f"Add '{attr}' explicitly with a valid value before returning XML."
+                        )
+
+                    if struct_msg == last_structure_error:
+                        repeated_structure_error_count += 1
+                    else:
+                        last_structure_error = struct_msg
+                        repeated_structure_error_count = 1
+
+                    if repeated_structure_error_count >= 2:
+                        repair_hint += (
+                            " You are repeating the same structural error. "
+                            "Discard the previous tree and rebuild the entire BT skeleton first "
+                            "(root -> BehaviorTree -> control flow with valid arity), then fill leaf nodes."
+                        )
+
+                    if repeated_structure_error_count >= 5:
+                        self.get_logger().error(
+                            "❌ Aborting early: repeated identical BT structure error 5 times."
+                        )
+                        response.success = False
+                        response.message = (
+                            "Repeated BT structure error (x5): "
+                            f"{struct_msg}"
+                        )
+                        vector_db.delete_collection()
+                        return response
+
                     messages.append(AIMessage(content=ai_msg.content))
-                    messages.append(HumanMessage(content=f"ERROR: BehaviorTree structure invalid: {struct_msg}. Fix the tree structure."))
+                    messages.append(HumanMessage(content=f"ERROR: BehaviorTree structure invalid: {struct_msg}. {repair_hint}"))
                     time.sleep(1)
                     continue
 
@@ -742,252 +780,16 @@ class RagBTAgent(Node):
             return False, str(e)
 
     def validate_xml_bt(self, xml_string):
-        """Validate BehaviorTree structural rules (decorators have 1 child, control nodes have children, etc.)"""
-        try:
-            root = ET.fromstring(xml_string)
-            
-            for elem in root.iter():
-                children = list(elem)
-                
-                # Skip text/comments
-                if not isinstance(elem.tag, str):
-                    continue
-                
-                # Root and BehaviorTree should have exactly 1 child
-                if elem.tag in ['root', 'BehaviorTree']:
-                    if len(children) != 1:
-                        return False, f"<{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Decorators must have exactly 1 child
-                elif elem.tag in self.decorators:
-                    if len(children) != 1:
-                        return False, f"Decorator <{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Control nodes must have at least 1 child
-                elif elem.tag in self.control_nodes:
-                    if len(children) < 1:
-                        return False, f"Control node <{elem.tag}> must have at least 1 child, found {len(children)}"
-                
-                # AlwaysSuccess/AlwaysFailure should have 0 children
-                elif elem.tag in ['AlwaysSuccess', 'AlwaysFailure']:
-                    if len(children) > 0:
-                        return False, f"<{elem.tag}> should not have children, found {len(children)}"
-
-                # Check required ports for structural nodes (e.g. num_attempts on RetryUntilSuccessful)
-                for req_port in self.structural_required_ports.get(elem.tag, []):
-                    if req_port not in elem.attrib:
-                        return False, (f"<{elem.tag}> is missing required attribute '{req_port}'. "
-                                       f"Add it, e.g. {req_port}=\"1\".")
-            
-            return True, "OK"
-        except Exception as e:
-            return False, str(e)
+        return super().validate_xml_bt(xml_string)
 
     def validate_bt_semantics(self, xml_string, node_specs, known_bb_vars=None, required_outputs=None, recovery_policy=None):
-        # Check that custom nodes exist in YAML and ports are correct
-        # Note: Structural validation is done in validate_xml_bt
-        try:
-            root = ET.fromstring(xml_string)
-            known_bb_vars = set(known_bb_vars or [])
-            required_outputs = set(required_outputs or [])
-            produced_in_tree = set()
-            parent_map = {child: parent for parent in root.iter() for child in list(parent)}
-            recovery_policy = recovery_policy or {'required': False, 'loop_required': False, 'retry_attempts': None}
-            
-            for elem in root.iter():
-                # Skip structural BT.CPP nodes (using set for O(1) lookup)
-                if elem.tag in self.structural_nodes:
-                    continue
-                    
-                # Validate custom/action nodes from YAML
-                if elem.tag not in node_specs:
-                    return False, f"Node <{elem.tag}> does NOT exist in the capabilities YAML."
-
-                spec = node_specs[elem.tag]
-                allowed_ports = spec.get('ports', [])
-                required_inputs = spec.get('required_inputs', [])
-                input_ports = spec.get('input_ports', set())
-                output_ports = spec.get('output_ports', set())
-
-                # Validate required input ports are explicitly wired.
-                missing_required = []
-                for req in required_inputs:
-                    if req not in elem.attrib or str(elem.attrib.get(req, '')).strip() == '':
-                        missing_required.append(req)
-                if missing_required:
-                    return False, (
-                        f"Node <{elem.tag}> is missing required input port(s): {missing_required}. "
-                        f"Provide explicit values for those attributes."
-                    )
-                
-                # Validate ports/attributes
-                for attr in elem.attrib:
-                    if attr in ['name', 'ID']:  # Structural attributes
-                        continue
-                    if attr not in allowed_ports:
-                        return False, f"Node <{elem.tag}> has an illegal port: '{attr}'. Allowed: {allowed_ports}"
-
-                    # Blackboard references must be exactly one {var} token, not concatenations.
-                    value = str(elem.attrib[attr]).strip()
-                    if '{' in value or '}' in value:
-                        refs = re.findall(r'\{[^{}]+\}', value)
-                        if len(refs) != 1 or refs[0] != value:
-                            return False, (
-                                f"Node <{elem.tag}> has malformed blackboard reference in port '{attr}': '{value}'. "
-                                f"Use exactly one blackboard variable like '{{my_var}}', or a plain literal."
-                            )
-
-                        # Reject invalid BB keys like '{a},{b}' or '{a};{b}' interpreted as a single missing key.
-                        bb_key = value[1:-1]
-                        if ',' in bb_key or ';' in bb_key:
-                            return False, (
-                                f"Node <{elem.tag}> port '{attr}' uses an invalid blackboard key '{bb_key}'. "
-                                f"Do not concatenate multiple variables inside one {{}}. "
-                                f"Write to a single combined variable first, then pass that variable."
-                            )
-
-                        # Reads must refer to values available at step start or produced earlier in this BT.
-                        # Use direction metadata when available; otherwise default to read for non-output ports.
-                        is_read_ref = (attr in input_ports) or (attr not in output_ports)
-                        if is_read_ref and bb_key not in known_bb_vars and bb_key not in produced_in_tree:
-                            return False, (
-                                f"Node <{elem.tag}> reads unknown blackboard key '{bb_key}' in input port '{attr}'. "
-                                f"Declare it in objective inputs/available_blackboard_vars or write it earlier in this step."
-                            )
-
-                        if attr in output_ports:
-                            produced_in_tree.add(bb_key)
-
-                    elif attr in output_ports and value:
-                        # Track literal outputs too, so later inputs can consume these keys when mapped.
-                        literal_key = value.strip()
-                        if literal_key.startswith('{') and literal_key.endswith('}'):
-                            produced_in_tree.add(literal_key[1:-1])
-
-            # Enforce declared inter-step contract: all required outputs must be produced.
-            missing_outputs = required_outputs - produced_in_tree
-            if missing_outputs:
-                missing = sorted(missing_outputs)
-                return False, (
-                    f"BT did not write required output blackboard key(s): {missing}. "
-                    f"Map node output ports to these exact keys."
-                )
-
-            loop_controls = {'RetryUntilSuccessful', 'Repeat'}
-            has_loop = any(
-                isinstance(elem.tag, str) and elem.tag in loop_controls
-                for elem in root.iter()
-            )
-
-            retry_nodes = [
-                elem for elem in root.iter()
-                if isinstance(elem.tag, str) and elem.tag == 'RetryUntilSuccessful'
-            ]
-            retry_control_allowed = (
-                recovery_policy.get('required', False) or
-                recovery_policy.get('loop_required', False)
-            )
-
-            if not retry_control_allowed and retry_nodes:
-                return False, (
-                    "Objective recovery_policy has required=false and loop_until_success=false, "
-                    "so BT must not use RetryUntilSuccessful for this step."
-                )
-
-            expected_retry_attempts = recovery_policy.get('retry_attempts', None)
-            if retry_control_allowed and expected_retry_attempts is not None:
-                if not retry_nodes:
-                    return False, (
-                        "Objective recovery_policy.retry_attempts is set for a retry-enabled step, but BT has no RetryUntilSuccessful node. "
-                        "Use RetryUntilSuccessful with num_attempts matching recovery_policy.retry_attempts."
-                    )
-
-                has_expected_retry = False
-                for retry_node in retry_nodes:
-                    raw_num = str(retry_node.attrib.get('num_attempts', '')).strip()
-                    try:
-                        current = int(raw_num)
-                    except ValueError:
-                        continue
-
-                    if expected_retry_attempts == 'forever' and current == -1:
-                        has_expected_retry = True
-                        break
-                    if isinstance(expected_retry_attempts, int) and current == expected_retry_attempts:
-                        has_expected_retry = True
-                        break
-
-                if not has_expected_retry:
-                    expected_value = '-1' if expected_retry_attempts == 'forever' else str(expected_retry_attempts)
-                    return False, (
-                        "Objective recovery_policy.retry_attempts requires "
-                        f"RetryUntilSuccessful num_attempts=\"{expected_value}\", "
-                        "but BT uses a different value."
-                    )
-
-            # Recoverable-check policy is enforced ONLY when explicitly declared
-            # via objective.recovery_policy.required (no keyword heuristics).
-            if recovery_policy.get('required', False):
-                condition_tags = {
-                    name for name, spec in node_specs.items()
-                    if spec.get('type') == 'condition'
-                }
-                condition_nodes = [
-                    elem for elem in root.iter()
-                    if isinstance(elem.tag, str) and elem.tag in condition_tags
-                ]
-
-                if condition_nodes:
-                    if recovery_policy.get('loop_required', False) and not has_loop:
-                        return False, (
-                            "Objective recovery_policy requires loop_until_success, but BT has no retry loop control. "
-                            "Wrap check+recovery logic with RetryUntilSuccessful (or Repeat)."
-                        )
-
-                    branching_controls = {'Fallback', 'ReactiveFallback'}
-
-                    def has_branching_ancestor(node):
-                        parent = parent_map.get(node)
-                        while parent is not None:
-                            if isinstance(parent.tag, str) and parent.tag in branching_controls:
-                                return True
-                            parent = parent_map.get(parent)
-                        return False
-
-                    for cond in condition_nodes:
-                        if not has_branching_ancestor(cond):
-                            return False, (
-                                f"Recovery branch missing for condition <{cond.tag}>. "
-                                "For recoverable checks, place conditions under Fallback/ReactiveFallback "
-                                "with an explicit failure-recovery branch."
-                            )
-
-            # Progress-safety check: an always-RUNNING leaf in ordered short-circuit controls
-            # blocks later siblings from being ticked.
-            # ReactiveSequence is included: it also stops advancing past a RUNNING child.
-            blocking_controls = ('Sequence', 'Fallback', 'ReactiveSequence')
-            for control_tag in blocking_controls:
-                for control in root.iter(control_tag):
-                    children = [c for c in list(control) if isinstance(c.tag, str)]
-                    for child in children[:-1]:
-                        # Only leaf capability nodes are checked here; control/decorator nodes
-                        # require deeper control-flow analysis and are handled by prompt guidance.
-                        if child.tag in self.structural_nodes:
-                            continue
-                        spec = node_specs.get(child.tag)
-                        if not spec:
-                            continue
-                        statuses = set(spec.get('return_statuses', set()))
-                        if statuses == {'RUNNING'}:
-                            return False, (
-                                f"Node <{child.tag}> can only return RUNNING and appears before other "
-                                f"children inside <{control_tag}>, so later nodes are unreachable. "
-                                "Move it to the end of that control node or redesign with non-blocking flow."
-                            )
-
-            return True, "OK"
-        except Exception as e:
-            return False, str(e)
+        return super().validate_bt_semantics(
+            xml_string,
+            node_specs,
+            known_bb_vars,
+            required_outputs,
+            recovery_policy,
+        )
 
 def main(args=None):
     rclpy.init(args=args)

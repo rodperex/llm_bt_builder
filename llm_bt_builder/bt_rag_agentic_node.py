@@ -43,6 +43,10 @@ import re
 import os
 import time
 import xml.etree.ElementTree as ET
+try:
+    from llm_bt_builder.bt_validation import BTValidation
+except ModuleNotFoundError:
+    from bt_validation import BTValidation
 
 try:
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -68,7 +72,7 @@ class XMLArg(BaseModel):
 
 # ── ROS 2 Node ────────────────────────────────────────────────────────────────
 
-class AgenticBTNode(Node):
+class AgenticBTNode(BTValidation, Node):
 
     def __init__(self):
         super().__init__('llm_bt_agentic')
@@ -194,11 +198,7 @@ class AgenticBTNode(Node):
     # the per-request node_specs so they are safe across concurrent requests.
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _make_tools(self, full_node_specs, recovery_policy):
-        decorators      = self.decorators
-        control_nodes   = self.control_nodes
-        structural_nodes = self.structural_nodes
-        structural_required_ports = self.structural_required_ports
+    def _make_tools(self, full_node_specs, known_bb_vars, required_output_vars, recovery_policy):
 
         # Mutable state shared between submit_bt_xml closure and the caller
         submit_state = {"xml": None, "done": False}
@@ -221,37 +221,10 @@ class AgenticBTNode(Node):
             - Control nodes must have at least 1 child.
             - AlwaysSuccess / AlwaysFailure must have 0 children.
             Call this after validate_xml_syntax returns VALID."""
-            try:
-                root = ET.fromstring(xml)
-            except ET.ParseError as e:
-                return f"ERROR: Cannot parse XML — {e}. Run validate_xml_syntax first."
-
-            for elem in root.iter():
-                if not isinstance(elem.tag, str):
-                    continue
-                n = len(list(elem))
-                if elem.tag in ('root', 'BehaviorTree'):
-                    if n != 1:
-                        return (f"ERROR: <{elem.tag}> must have exactly 1 child, "
-                                f"found {n}.")
-                elif elem.tag in decorators:
-                    if n != 1:
-                        return (f"ERROR: Decorator <{elem.tag}> must have exactly 1 child, "
-                                f"found {n}.")
-                elif elem.tag in control_nodes:
-                    if n < 1:
-                        return (f"ERROR: Control node <{elem.tag}> must have at least 1 child, "
-                                f"found {n}.")
-                elif elem.tag in ('AlwaysSuccess', 'AlwaysFailure'):
-                    if n > 0:
-                        return f"ERROR: <{elem.tag}> must have 0 children, found {n}."
-                required = structural_required_ports.get(elem.tag, [])
-                for req_port in required:
-                    if req_port not in elem.attrib:
-                        return (f"ERROR: <{elem.tag}> is missing required attribute '{req_port}'. "
-                                f"Add it, e.g. {req_port}=\"3\".")
-
-            return "VALID: BehaviorTree structure is correct."
+            ok, msg = self.validate_xml_bt(xml)
+            if ok:
+                return "VALID: BehaviorTree structure is correct."
+            return f"ERROR: {msg}"
 
         # ── Tool 3: BT semantics ───────────────────────────────────────────
         def validate_bt_semantics(xml: str) -> str:
@@ -259,135 +232,16 @@ class AgenticBTNode(Node):
             capabilities YAML and only uses declared ports.
             Call this after validate_bt_structure returns VALID."""
             try:
-                root = ET.fromstring(xml)
-            except ET.ParseError as e:
-                return f"ERROR: Cannot parse XML — {e}. Run validate_xml_syntax first."
-
-            parent_map = {child: parent for parent in root.iter() for child in list(parent)}
-
-            for elem in root.iter():
-                if not isinstance(elem.tag, str) or elem.tag in structural_nodes:
-                    continue
-                if elem.tag not in full_node_specs:
-                    return (f"ERROR: Node <{elem.tag}> is NOT in the capabilities list. "
-                            f"Use only allowed nodes.")
-                spec = full_node_specs[elem.tag]
-                allowed = spec.get('ports', [])
-                for attr in elem.attrib:
-                    if attr in ('name', 'ID'):
-                        continue
-                    if attr not in allowed:
-                        return (f"ERROR: Node <{elem.tag}> uses undeclared port '{attr}'. "
-                                f"Allowed ports: {allowed}.")
-
-            # Progress-safety: always-RUNNING leaves cannot precede required siblings
-            # in ordered short-circuit controls.
-            # ReactiveSequence is included: it also stops advancing past a RUNNING child.
-            blocking_controls = ('Sequence', 'Fallback', 'ReactiveSequence')
-            for control_tag in blocking_controls:
-                for control in root.iter(control_tag):
-                    children = [c for c in list(control) if isinstance(c.tag, str)]
-                    for child in children[:-1]:
-                        if child.tag in structural_nodes:
-                            continue
-                        spec = full_node_specs.get(child.tag)
-                        if not spec:
-                            continue
-                        statuses = set(spec.get('return_statuses', set()))
-                        if statuses == {'RUNNING'}:
-                            return (
-                                f"ERROR: Node <{child.tag}> can only return RUNNING and appears before "
-                                f"other children inside <{control_tag}>, making later nodes unreachable. "
-                                "Move it to the end of that control node or redesign with non-blocking flow."
-                            )
-
-            loop_controls = {'RetryUntilSuccessful', 'Repeat'}
-            has_loop = any(
-                isinstance(elem.tag, str) and elem.tag in loop_controls
-                for elem in root.iter()
-            )
-
-            retry_nodes = [
-                elem for elem in root.iter()
-                if isinstance(elem.tag, str) and elem.tag == 'RetryUntilSuccessful'
-            ]
-            retry_control_allowed = (
-                recovery_policy.get('required', False) or
-                recovery_policy.get('loop_required', False)
-            )
-
-            if not retry_control_allowed and retry_nodes:
-                return (
-                    "ERROR: Objective recovery_policy has required=false and loop_until_success=false, "
-                    "so BT must not use RetryUntilSuccessful for this step."
+                ok, msg = self.validate_bt_semantics(
+                    xml,
+                    full_node_specs,
+                    known_bb_vars,
+                    required_output_vars,
+                    recovery_policy,
                 )
-
-            expected_retry_attempts = recovery_policy.get('retry_attempts', None)
-            if retry_control_allowed and expected_retry_attempts is not None:
-                if not retry_nodes:
-                    return (
-                        "ERROR: Objective recovery_policy.retry_attempts is set for a retry-enabled step, but BT has no RetryUntilSuccessful node. "
-                        "Use RetryUntilSuccessful with num_attempts matching recovery_policy.retry_attempts."
-                    )
-
-                has_expected_retry = False
-                for retry_node in retry_nodes:
-                    raw_num = str(retry_node.attrib.get('num_attempts', '')).strip()
-                    try:
-                        current = int(raw_num)
-                    except ValueError:
-                        continue
-
-                    if expected_retry_attempts == 'forever' and current == -1:
-                        has_expected_retry = True
-                        break
-                    if isinstance(expected_retry_attempts, int) and current == expected_retry_attempts:
-                        has_expected_retry = True
-                        break
-
-                if not has_expected_retry:
-                    expected_value = '-1' if expected_retry_attempts == 'forever' else str(expected_retry_attempts)
-                    return (
-                        "ERROR: Objective recovery_policy.retry_attempts requires "
-                        f"RetryUntilSuccessful num_attempts=\"{expected_value}\", but BT uses a different value."
-                    )
-
-            if recovery_policy.get('required', False):
-                condition_tags = {
-                    name for name, spec in full_node_specs.items()
-                    if spec.get('type') == 'condition'
-                }
-                condition_nodes = [
-                    elem for elem in root.iter()
-                    if isinstance(elem.tag, str) and elem.tag in condition_tags
-                ]
-
-                if condition_nodes:
-                    if recovery_policy.get('loop_required', False) and not has_loop:
-                        return (
-                            "ERROR: Objective recovery_policy requires loop_until_success, but BT has no retry loop control. "
-                            "Wrap check+recovery logic with RetryUntilSuccessful (or Repeat)."
-                        )
-
-                    branching_controls = {'Fallback', 'ReactiveFallback'}
-
-                    def has_branching_ancestor(node):
-                        parent = parent_map.get(node)
-                        while parent is not None:
-                            if isinstance(parent.tag, str) and parent.tag in branching_controls:
-                                return True
-                            parent = parent_map.get(parent)
-                        return False
-
-                    for cond in condition_nodes:
-                        if not has_branching_ancestor(cond):
-                            return (
-                                f"ERROR: Recovery branch missing for condition <{cond.tag}>. "
-                                "For recoverable checks, place conditions under Fallback/ReactiveFallback "
-                                "with an explicit failure-recovery branch."
-                            )
-
-            return "VALID: All nodes and ports are semantically correct."
+                if ok:
+                    return "VALID: BT semantics are correct."
+                return f"ERROR: {msg}"
 
         # ── Tool 4: submit ─────────────────────────────────────────────────
         def submit_bt_xml(xml: str) -> str:
@@ -456,26 +310,7 @@ class AgenticBTNode(Node):
             return None
 
     def _parse_full_specs(self, yaml_content):
-        specs = {}
-        try:
-            data = yaml.safe_load(yaml_content)
-            for node in data.get('bt_nodes', []):
-                raw_ports = node.get('ports', []) or []
-                ports = [p.get('key') or p.get('name')
-                         for p in raw_ports if p.get('key') or p.get('name')]
-                return_statuses = set()
-                raw_returns = node.get('return', {})
-                if isinstance(raw_returns, dict):
-                    for status_name in raw_returns.keys():
-                        if isinstance(status_name, str):
-                            return_statuses.add(status_name.strip().upper())
-                specs[node['name']] = {
-                    'ports': ports,
-                    'return_statuses': return_statuses,
-                }
-        except Exception:
-            pass
-        return specs
+        return self._parse_capability_specs(yaml_content)
 
     def _load_prompt_template(self):
         try:
@@ -512,20 +347,7 @@ class AgenticBTNode(Node):
             return []
 
     def _parse_structural_required_ports(self, *yaml_contents):
-        """Extract required port names for each structural (control/decorator) node."""
-        required = {}
-        for content in yaml_contents:
-            try:
-                data = yaml.safe_load(content)
-                for node in data.get('bt_nodes', []):
-                    ports = node.get('ports', []) or []
-                    req = [p.get('name') or p.get('key')
-                           for p in ports if p.get('name') or p.get('key')]
-                    if req:
-                        required[node['name']] = req
-            except Exception:
-                pass
-        return required
+        return super()._parse_structural_required_ports(*yaml_contents)
 
     def _extract_recovery_policy(self, objective_text):
         """Read optional objective.recovery_policy without keyword heuristics."""
@@ -601,145 +423,22 @@ class AgenticBTNode(Node):
     # FINAL SAFETY CHECK (programmatic, runs after submit_bt_xml)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _final_validate(self, xml_str, node_specs, recovery_policy):
+    def _final_validate(self, xml_str, node_specs, known_bb_vars, required_output_vars, recovery_policy):
         # Phase 1 — Syntax
         try:
-            root = ET.fromstring(xml_str)
+            ET.fromstring(xml_str)
         except ET.ParseError as e:
             return False, f"Syntax error: {e}"
-
-        # Phase 2 — Structure
-        for elem in root.iter():
-            if not isinstance(elem.tag, str):
-                continue
-            n = len(list(elem))
-            if elem.tag in ('root', 'BehaviorTree') and n != 1:
-                return False, f"<{elem.tag}> must have 1 child, found {n}"
-            elif elem.tag in self.decorators and n != 1:
-                return False, f"Decorator <{elem.tag}> must have 1 child, found {n}"
-            elif elem.tag in self.control_nodes and n < 1:
-                return False, f"Control node <{elem.tag}> must have ≥1 child"
-            for req_port in self.structural_required_ports.get(elem.tag, []):
-                if req_port not in elem.attrib:
-                    return False, (f"<{elem.tag}> missing required attribute '{req_port}'")
-
-        # Phase 3 — Semantics
-        for elem in root.iter():
-            if not isinstance(elem.tag, str) or elem.tag in self.structural_nodes:
-                continue
-            if elem.tag not in node_specs:
-                return False, f"Node <{elem.tag}> not in capabilities YAML"
-            for attr in elem.attrib:
-                if attr in ('name', 'ID'):
-                    continue
-                if attr not in node_specs[elem.tag]:
-                    return False, f"Node <{elem.tag}> has undeclared port '{attr}'"
-
-        # Phase 4 — Progress-safety
-        blocking_controls = ('Sequence', 'Fallback', 'ReactiveSequence')
-        for control_tag in blocking_controls:
-            for control in root.iter(control_tag):
-                children = [c for c in list(control) if isinstance(c.tag, str)]
-                for child in children[:-1]:
-                    if child.tag in self.structural_nodes:
-                        continue
-                    spec = node_specs.get(child.tag)
-                    if not spec:
-                        continue
-                    statuses = set(spec.get('return_statuses', set()))
-                    if statuses == {'RUNNING'}:
-                        return False, (
-                            f"Node <{child.tag}> can only return RUNNING and appears before other "
-                            f"children inside <{control_tag}>, so later nodes are unreachable."
-                        )
-
-        # Phase 5 — Recovery policy checks (only when explicitly declared)
-        parent_map = {child: parent for parent in root.iter() for child in list(parent)}
-        loop_controls = {'RetryUntilSuccessful', 'Repeat'}
-        has_loop = any(
-            isinstance(elem.tag, str) and elem.tag in loop_controls
-            for elem in root.iter()
+        ok, err = self.validate_xml_bt(xml_str)
+        if not ok:
+            return False, err
+        return self.validate_bt_semantics(
+            xml_str,
+            node_specs,
+            known_bb_vars,
+            required_output_vars,
+            recovery_policy,
         )
-
-        retry_nodes = [
-            elem for elem in root.iter()
-            if isinstance(elem.tag, str) and elem.tag == 'RetryUntilSuccessful'
-        ]
-        retry_control_allowed = (
-            recovery_policy.get('required', False) or
-            recovery_policy.get('loop_required', False)
-        )
-
-        if not retry_control_allowed and retry_nodes:
-            return False, (
-                "Objective recovery_policy has required=false and loop_until_success=false, "
-                "so BT must not use RetryUntilSuccessful for this step."
-            )
-
-        expected_retry_attempts = recovery_policy.get('retry_attempts', None)
-        if retry_control_allowed and expected_retry_attempts is not None:
-            if not retry_nodes:
-                return False, (
-                    "Objective recovery_policy.retry_attempts is set for a retry-enabled step, but BT has no RetryUntilSuccessful node."
-                )
-
-            has_expected_retry = False
-            for retry_node in retry_nodes:
-                raw_num = str(retry_node.attrib.get('num_attempts', '')).strip()
-                try:
-                    current = int(raw_num)
-                except ValueError:
-                    continue
-
-                if expected_retry_attempts == 'forever' and current == -1:
-                    has_expected_retry = True
-                    break
-                if isinstance(expected_retry_attempts, int) and current == expected_retry_attempts:
-                    has_expected_retry = True
-                    break
-
-            if not has_expected_retry:
-                expected_value = '-1' if expected_retry_attempts == 'forever' else str(expected_retry_attempts)
-                return False, (
-                    "Objective recovery_policy.retry_attempts requires "
-                    f"RetryUntilSuccessful num_attempts=\"{expected_value}\", but BT uses a different value."
-                )
-
-        if recovery_policy.get('required', False):
-            condition_tags = {
-                name for name, spec in node_specs.items()
-                if spec.get('type') == 'condition'
-            }
-            condition_nodes = [
-                elem for elem in root.iter()
-                if isinstance(elem.tag, str) and elem.tag in condition_tags
-            ]
-
-            if condition_nodes:
-                if recovery_policy.get('loop_required', False) and not has_loop:
-                    return False, (
-                        "Objective recovery_policy requires loop_until_success, but BT has no retry loop control."
-                    )
-
-                branching_controls = {'Fallback', 'ReactiveFallback'}
-
-                def has_branching_ancestor(node):
-                    parent = parent_map.get(node)
-                    while parent is not None:
-                        if isinstance(parent.tag, str) and parent.tag in branching_controls:
-                            return True
-                        parent = parent_map.get(parent)
-                    return False
-
-                for cond in condition_nodes:
-                    if not has_branching_ancestor(cond):
-                        return False, (
-                            f"Recovery branch missing for condition <{cond.tag}>. "
-                            "For recoverable checks, place conditions under Fallback/ReactiveFallback "
-                            "with an explicit failure-recovery branch."
-                        )
-
-        return True, "OK"
 
     # ─────────────────────────────────────────────────────────────────────────
     # SERVICE CALLBACK — agentic loop
@@ -763,6 +462,8 @@ class AgenticBTNode(Node):
 
         # 1. Parse full node specs for final validation
         full_node_specs = self._parse_full_specs(request.bt_nodes_yaml)
+        known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        required_output_vars = self._extract_required_output_vars(request.objective)
         recovery_policy = self._extract_recovery_policy(request.objective)
 
         # 2. RAG — retrieve top-K semantically relevant nodes
@@ -814,7 +515,12 @@ class AgenticBTNode(Node):
         )
 
         # 4. Build tools for this request and bind to LLM
-        tools, submit_state = self._make_tools(full_node_specs, recovery_policy)
+        tools, submit_state = self._make_tools(
+            full_node_specs,
+            known_bb_vars,
+            required_output_vars,
+            recovery_policy,
+        )
         llm_with_tools      = self.llm.bind_tools(tools)
         tool_map            = {t.name: t for t in tools}
 
@@ -884,7 +590,13 @@ class AgenticBTNode(Node):
                         if root_idx != -1:
                             end_idx = xml_str.find(">", root_idx) + 1
                             xml_str = xml_str[:end_idx] + comment + xml_str[end_idx:]
-                        ok, err  = self._final_validate(xml_str, full_node_specs, recovery_policy)
+                        ok, err  = self._final_validate(
+                            xml_str,
+                            full_node_specs,
+                            known_bb_vars,
+                            required_output_vars,
+                            recovery_policy,
+                        )
 
                         if ok:
                             self.get_logger().info("🎉 XML validated and accepted by safety check.")
