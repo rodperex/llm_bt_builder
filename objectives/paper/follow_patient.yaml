@@ -1,0 +1,35 @@
+objective:
+
+  name: "follow_patient"
+  
+  description: "A social service robot works at a community clinic reception hall. Overall goal: Assist clinic visitors by validating appointment ID and directly asking them to hand over their things for carry assistance. In this step: The robot must warn the visitor before starting the follow behavior and then follow the visitor to their destination."
+  
+  skills_used:
+    - "Speak using text-to-speech"
+    - "Follow a moving person or entity to maintain relative distance (tracking behavior, not destination-leading navigation)"
+    - "Detect whether a target frame has remained static for a minimum duration"
+  
+  inputs:
+    - detected_person
+    - bag_handed_over
+  
+  outputs:
+  
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+  
+  steps:
+    - step: "Warn the visitor that follow behavior will begin"
+    - step: "Follow the visitor while maintaining a minimum distance of 1 meter"
+    - step: "Detect if the target has remained static for more than 5 seconds to infer arrival"
+    - step: "If the visitor has arrived, communicate it, and end the behavior."
+    - step: "If the visitor is lost at some point, force a plan fail and go back to the reception desk."
+
+  style:
+    - polite
+useful_info: |
+  Available locations are:
+    - reception_desk
+    - patio

@@ -1,0 +1,13 @@
+blackboard:
+  detected_customer: table_5_customer
+  customer_name: alex
+  visit_reason: place_order
+  main_dish: pizza
+  drink: water
+  dessert: ice cream
+  detected_person: patient_1
+  bag_handed_over: true
+  destination_name: main_kitchen
+  arrival_wait_sec: 5
+  follow_min_distance_m: 1.0
+

@@ -2,6 +2,9 @@
 objective:
   name: "detect_customer"
   description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must spin in place until it identifies a customer ready to order."
+  skills_used:
+    - "Set the perception system to search for a specific target class"
+    - "Spin in place"
   outputs:
     - detected_customer
 

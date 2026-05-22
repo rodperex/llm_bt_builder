@@ -24,16 +24,24 @@ def generate_launch_description():
     provider_arg = DeclareLaunchArgument(
         'provider',
         default_value='openai',
-        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova'
-        description='LLM Provider: gemini, openai, anthropic, deepseek, or ollama'
+        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova', 'cerebras'
+        description='LLM Provider: gemini, openai, anthropic, deepseek, ollama, cerebras'
     )
 
     model_arg = DeclareLaunchArgument(
         'model',
+        # default_value='command-r:35b',
+        # default_value='qwen2.5:7b',
+        # default_value='Meta-Llama-3.3-70B-Instruct',
+        # default_value='llama-3.3-70b-versatile',
+        # default_value='llama3.1-8b',
         # default_value='Meta-Llama-3.3-70B-Instruct',
         # default_value='gemini-2.5-flash-lite',
         # default_value='llama-3.1-8b-instant',
         default_value='gpt-4o',
+        # default_value='gemini-3.1-flash-lite-preview',
+        # default_value='gemini-2.5-pro',
+        # default_value='gpt-4.1',
         # default_value='gemini-2.0-flash-lite',
         # default_value='qwen2.5-coder:3b', # ollama (lighter model for testing)
         # default_value='qwen2.5-coder:7b', # ollama (powerful GPU required)
@@ -107,6 +115,12 @@ def generate_launch_description():
         description='If true, continue without MCP on failure.'
     )
 
+    use_general_context_arg = DeclareLaunchArgument(
+        'use_general_context',
+        default_value='false',
+        description='If true, inject general MCP context (capabilities and mission snapshot) into the prompt.'
+    )
+
     use_episodic_mem_arg = DeclareLaunchArgument(
         'use_episodic_mem',
         default_value='false',
@@ -177,6 +191,7 @@ def generate_launch_description():
             'mcp_cmd': LaunchConfiguration('mcp_cmd'),
             'mcp_timeout_sec': LaunchConfiguration('mcp_timeout_sec'),
             'mcp_fail_open': LaunchConfiguration('mcp_fail_open'),
+            'use_general_context': LaunchConfiguration('use_general_context'),
             'use_episodic_mem': LaunchConfiguration('use_episodic_mem'),
             'episodic_mem_pool_size': LaunchConfiguration('episodic_mem_pool_size'),
             'episodic_mem_top_k': LaunchConfiguration('episodic_mem_top_k'),
@@ -238,6 +253,7 @@ def generate_launch_description():
         mcp_cmd_arg,
         mcp_timeout_arg,
         mcp_fail_open_arg,
+        use_general_context_arg,
         use_episodic_mem_arg,
         episodic_mem_pool_size_arg,
         episodic_mem_top_k_arg,

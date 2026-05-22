@@ -4,10 +4,7 @@ objective:
   description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must spin in place until it identifies a customer ready to order."
   outputs:
     - detected_customer
-  recovery_policy:
-    required: false
-    loop_until_success: false
-    retry_attempts: 3
+
   steps:
     - step: "Set the perception system to search for a specific target class"
     - step: "Spin in place"

@@ -100,6 +100,7 @@ class AgenticBTNode(BTValidation, Node):
                 'anthropic': ['ANTHROPIC_API_KEY'],
                 'deepseek':  ['DEEPSEEK_API_KEY'],
                 'ollama':    ['LLM_API_KEY'],
+                'cerebras':  ['CEREBRAS_API_KEY'],
             }
             for ev in provider_to_env.get(self.llm_provider, ['LLM_API_KEY']):
                 self.api_key = os.getenv(ev, '')
@@ -181,6 +182,20 @@ class AgenticBTNode(BTValidation, Node):
                     temperature=0.1,
                     timeout=TIMEOUT,
                 )
+            elif self.llm_provider == 'cerebras':
+                self.get_logger().info(f"🧠 Configuring Cerebras Cloud ({self.model_id})...")
+                base = self.api_url.rstrip('/') if self.api_url else 'https://api.cerebras.ai/v1'
+                if base and not base.endswith('/v1'):
+                    base = base + '/v1'
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2,
+                )
             else:
                 self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
                 return None
@@ -198,7 +213,14 @@ class AgenticBTNode(BTValidation, Node):
     # the per-request node_specs so they are safe across concurrent requests.
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _make_tools(self, full_node_specs, known_bb_vars, required_output_vars, recovery_policy):
+    def _make_tools(
+        self,
+        full_node_specs,
+        known_bb_vars,
+        known_bb_var_types,
+        required_output_vars,
+        recovery_policy,
+    ):
 
         # Mutable state shared between submit_bt_xml closure and the caller
         submit_state = {"xml": None, "done": False}
@@ -221,10 +243,10 @@ class AgenticBTNode(BTValidation, Node):
             - Control nodes must have at least 1 child.
             - AlwaysSuccess / AlwaysFailure must have 0 children.
             Call this after validate_xml_syntax returns VALID."""
-            ok, msg = self.validate_xml_bt(xml)
+            ok, msg, hint = self.validate_xml_bt(xml)
             if ok:
                 return "VALID: BehaviorTree structure is correct."
-            return f"ERROR: {msg}"
+            return f"ERROR: {msg}. {hint}"
 
         # ── Tool 3: BT semantics ───────────────────────────────────────────
         def validate_bt_semantics(xml: str) -> str:
@@ -232,16 +254,17 @@ class AgenticBTNode(BTValidation, Node):
             capabilities YAML and only uses declared ports.
             Call this after validate_bt_structure returns VALID."""
             try:
-                ok, msg = self.validate_bt_semantics(
+                ok, msg, hint = self.validate_bt_semantics(
                     xml,
                     full_node_specs,
                     known_bb_vars,
+                    known_bb_var_types,
                     required_output_vars,
                     recovery_policy,
                 )
                 if ok:
                     return "VALID: BT semantics are correct."
-                return f"ERROR: {msg}"
+                return f"ERROR: {msg}. {hint}"
 
         # ── Tool 4: submit ─────────────────────────────────────────────────
         def submit_bt_xml(xml: str) -> str:
@@ -423,22 +446,32 @@ class AgenticBTNode(BTValidation, Node):
     # FINAL SAFETY CHECK (programmatic, runs after submit_bt_xml)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _final_validate(self, xml_str, node_specs, known_bb_vars, required_output_vars, recovery_policy):
+    def _final_validate(
+        self,
+        xml_str,
+        node_specs,
+        known_bb_vars,
+        known_bb_var_types,
+        required_output_vars,
+        recovery_policy,
+    ):
         # Phase 1 — Syntax
         try:
             ET.fromstring(xml_str)
         except ET.ParseError as e:
             return False, f"Syntax error: {e}"
-        ok, err = self.validate_xml_bt(xml_str)
+        ok, err, _ = self.validate_xml_bt(xml_str)
         if not ok:
             return False, err
-        return self.validate_bt_semantics(
+        ok, msg, _ = self.validate_bt_semantics(
             xml_str,
             node_specs,
             known_bb_vars,
+            known_bb_var_types,
             required_output_vars,
             recovery_policy,
         )
+        return ok, msg
 
     # ─────────────────────────────────────────────────────────────────────────
     # SERVICE CALLBACK — agentic loop
@@ -463,6 +496,7 @@ class AgenticBTNode(BTValidation, Node):
         # 1. Parse full node specs for final validation
         full_node_specs = self._parse_full_specs(request.bt_nodes_yaml)
         known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
         required_output_vars = self._extract_required_output_vars(request.objective)
         recovery_policy = self._extract_recovery_policy(request.objective)
 
@@ -518,6 +552,7 @@ class AgenticBTNode(BTValidation, Node):
         tools, submit_state = self._make_tools(
             full_node_specs,
             known_bb_vars,
+            known_bb_var_types,
             required_output_vars,
             recovery_policy,
         )
@@ -594,6 +629,7 @@ class AgenticBTNode(BTValidation, Node):
                             xml_str,
                             full_node_specs,
                             known_bb_vars,
+                            known_bb_var_types,
                             required_output_vars,
                             recovery_policy,
                         )

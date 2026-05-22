@@ -59,17 +59,20 @@ ros2 run llm_bt_builder bt_rag_agentic_node.py   # agentic (tool-calling)
 
 The launcher selects the agent via `agent_type` (`normal` / `rag` / `agentic`):
 ```bash
-# RAG agent (default)
-ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag model:=gemini-2.5-flash mode:=api key:=<API_KEY>
+# RAG agent with Gemini (default)
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag provider:=gemini model:=gemini-2.5-flash key:=<API_KEY>
 
-# Standard agent
-ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=normal model:=gpt-4o key:=<API_KEY>
+# RAG agent with Cerebras Cloud (recommended for cost-effective LLM inference)
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=rag provider:=cerebras model:=llama3.1-8b key:=<CEREBRAS_API_KEY>
+
+# Standard agent with OpenAI
+ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=normal provider:=openai model:=gpt-4o key:=<API_KEY>
 
 # Agentic agent (requires a tool-calling capable model)
 ros2 launch llm_bt_builder llm_agent.launch.py agent_type:=agentic provider:=openai model:=gpt-4o key:=<API_KEY>
 ```
 
-> **Note:** `agent_type:=agentic` requires a model with tool-calling support: Gemini 1.5+, GPT-4o, Claude 3+, DeepSeek-v2+. Ollama support depends on the model.
+> **Note:** `agent_type:=agentic` requires a model with tool-calling support: Gemini 1.5+, GPT-4o, Claude 3+, DeepSeek-v2+. Ollama support depends on the model. Cerebras models support tool-calling via compatible endpoints.
 
 ### Launch Client Node
 
@@ -94,11 +97,53 @@ The client loads the robot capabilities from the YAML file (default: `config/soc
 ### Configuration
 
 All server nodes accept these ROS 2 parameters:
-- `llm_provider`: `gemini`, `openai`, `anthropic`, `deepseek`, or `ollama`
-- `model_id`: Model ID (e.g., `gemini-2.5-flash`, `gpt-4o`, `llama3.1`)
+- `llm_provider`: `gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `sambanova`, `cerebras`, or `ollama`
+- `model_id`: Model ID (e.g., `gemini-2.5-flash`, `gpt-4o`, `claude-3-opus`, `llama3.1`)
 - `api_url`: REST endpoint URL (auto-detected per provider if empty)
-- `api_key`: API key (auto-detected from env vars if empty: `GEMINI_API_KEY`, `OPENAI_API_KEY`, etc.)
+- `api_key`: API key (auto-detected from env vars if empty: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `CEREBRAS_API_KEY`, etc.)
 - `prompt_file`: Prompt template filename in `prompts/` (e.g., `system_prompt_cot.txt`)
+
+#### Using Cerebras Cloud
+
+Cerebras Cloud provides cost-effective, fast LLM inference with OpenAI-compatible APIs. To use it:
+
+1. **Get an API Key:**
+   - Visit [https://cloud.cerebras.ai](https://cloud.cerebras.ai)
+   - Create an account and obtain your API key
+   - Set the environment variable:
+     ```bash
+     export CEREBRAS_API_KEY="<your-api-key>"
+     ```
+
+2. **Available Models:**
+   - `llama3.1-8b` (8B parameters, cost-effective, accessible)
+   - `gpt-oss-120b` (120B model, if available with your API key)
+   - `zai-glm-4.7` (GLM model variant)
+   - Check https://cloud.cerebras.ai for current model availability
+
+3. **Launch Example:**
+   ```bash
+   # RAG agent with Cerebras
+   ros2 launch llm_bt_builder llm_agent.launch.py \
+     agent_type:=rag \
+     provider:=cerebras \
+     model:=llama3.1-8b
+   ```
+   Or with explicit API key:
+   ```bash
+   ros2 launch llm_bt_builder llm_agent.launch.py \
+     agent_type:=rag \
+     provider:=cerebras \
+     model:=llama3.1-8b \
+     key:=$CEREBRAS_API_KEY
+   ```
+
+4. **Direct Service Call:**
+   ```bash
+   ros2 service call /generate_bt llm_bt_builder/srv/GenerateBT \
+     "{objective: 'Navigate to the kitchen', bt_nodes_yaml: '...'}" \
+     --ros-args -p llm_provider:=cerebras -p model_id:=llama3.1-8b
+   ```
 
 The `bt_agent_node.py` additionally accepts:
 - `execution_mode`: `local` (Hugging Face) or `api`

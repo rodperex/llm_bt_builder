@@ -1,0 +1,43 @@
+objective:
+
+  name: "capture_order"
+  
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot approaches the customer's table, ask them for their full order and capture the main dish, drink and dessert."
+  
+  skills_used:
+    - "Ask an open-ended question and capture the answer"
+    - "Speak using text-to-speech"
+    - "Force a controlled plan fail only when the current mission step explicitly authorizes it after bounded retries"
+
+  inputs:
+    - detected_customer
+  outputs:
+    - drink
+    - main_dish
+    - dessert
+  
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: 5
+
+  allow_forced_plan_fail: true
+
+  steps:
+    - step: "Navigate to a dynamic destination provided via blackboard (e.g. {detected_person}, {extracted_location})"
+    - step: "Salute the customer"
+    - step: "Tell the customer the list of available food, drinks, and desserts"
+    - step: "Ask an open-ended question and capture the order"
+    - step: "Extract semantic information fields from free text using LLM (names, items, intents)"
+    - step: "Tell extracted items back to the customer."
+    - step: "Confirm if the extracted order is correct or not"
+    - step: "If the order is correct, thank the customer and say goodbye. If the order is not correct, apologize, force a plan fail and say goodbye."
+
+  style:
+    - patient
+    - polite
+
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available desserts: ice cream;cake

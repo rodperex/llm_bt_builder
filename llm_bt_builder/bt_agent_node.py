@@ -33,7 +33,7 @@ class BTAgentNode(BTValidation, Node):
         super().__init__('llm_bt_agent')
 
         # === CONFIGURATION ===
-        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek, groq, sambanova, cerebras
         self.declare_parameter('execution_mode', 'api') 
         self.declare_parameter('model_id', 'gemini-2.5-flash')
         self.declare_parameter('model_cache_dir', './llm_models')
@@ -59,7 +59,10 @@ class BTAgentNode(BTValidation, Node):
                 'openai': ['OPENAI_API_KEY'],
                 'anthropic': ['ANTHROPIC_API_KEY'],
                 'deepseek': ['DEEPSEEK_API_KEY'],
-                'ollama': ['LLM_API_KEY']
+                'ollama': ['LLM_API_KEY'],
+                'groq': ['GROQ_API_KEY'],
+                'sambanova': ['SAMBANOVA_API_KEY'],
+                'cerebras': ['CEREBRAS_API_KEY']
             }
             
             env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
@@ -199,6 +202,27 @@ class BTAgentNode(BTValidation, Node):
 
         return policy
 
+    def _extract_allow_forced_plan_fail(self, objective_text):
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return False
+
+        found_values = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'allow_forced_plan_fail':
+                        found_values.append(bool(v))
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+        return any(found_values)
+
     def generate_bt_callback(self, request, response):
         MAX_RETRIES = 25
 
@@ -206,7 +230,9 @@ class BTAgentNode(BTValidation, Node):
         recovery_policy = self._extract_recovery_policy(request.objective)
         node_specs = self._parse_capability_specs(request.bt_nodes_yaml)
         known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
         required_output_vars = self._extract_required_output_vars(request.objective)
+        allow_forced_plan_fail = self._extract_allow_forced_plan_fail(request.objective)
         if not node_specs:
             response.success = False
             response.message = "YAML Error: Could not parse BT node capabilities"
@@ -260,21 +286,23 @@ class BTAgentNode(BTValidation, Node):
                 continue 
 
             # === PHASE 2: BEHAVORTREE STRUCTURE VALIDATION ===
-            is_structure_valid, structure_msg = self.validate_xml_bt(xml_result)
+            is_structure_valid, structure_msg, structure_hint = self.validate_xml_bt(xml_result)
             
             if not is_structure_valid:
                 self.get_logger().warn(f"⚠️ BT Structure Error: {structure_msg}")
                 messages.append({"role": "assistant", "content": xml_str})
-                messages.append({"role": "user", "content": f"BEHAVORTREE STRUCTURE ERROR: {structure_msg}. Fix the tree structure."})
+                messages.append({"role": "user", "content": f"BEHAVORTREE STRUCTURE ERROR: {structure_msg}. {structure_hint}"})
                 continue
 
             # === PHASE 3: SEMANTIC VALIDATION ===
-            is_bt_valid, semantic_msg = self.validate_bt_semantics(
+            is_bt_valid, semantic_msg, semantic_hint = self.validate_bt_semantics(
                 xml_result,
                 node_specs,
                 known_bb_vars,
+                known_bb_var_types,
                 required_output_vars,
                 recovery_policy,
+                allow_forced_plan_fail,
             )
 
             if is_bt_valid:
@@ -287,7 +315,7 @@ class BTAgentNode(BTValidation, Node):
             else:
                 self.get_logger().warn(f"⚠️ Semantic Error: {semantic_msg}")
                 messages.append({"role": "assistant", "content": xml_str})
-                messages.append({"role": "user", "content": f"LOGICAL ERROR: {semantic_msg}. Only use the defined ports."})
+                messages.append({"role": "user", "content": f"LOGICAL ERROR: {semantic_msg}. {semantic_hint}"})
 
         response.success = False
         response.message = "Exceeded number of retries."
@@ -304,13 +332,24 @@ class BTAgentNode(BTValidation, Node):
     def validate_xml_bt(self, root):
         return super().validate_xml_bt(root)
 
-    def validate_bt_semantics(self, root, node_specs, known_bb_vars=None, required_outputs=None, recovery_policy=None):
+    def validate_bt_semantics(
+        self,
+        root,
+        node_specs,
+        known_bb_vars=None,
+        known_bb_var_types=None,
+        required_outputs=None,
+        recovery_policy=None,
+        allow_forced_plan_fail=None,
+    ):
         return super().validate_bt_semantics(
             root,
             node_specs,
             known_bb_vars,
+            known_bb_var_types,
             required_outputs,
             recovery_policy,
+            allow_forced_plan_fail,
         )
 
     def call_llm(self, messages):
@@ -358,9 +397,9 @@ class BTAgentNode(BTValidation, Node):
                         return None
                     
                 # =========================================================
-                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / DEEPSEEK / OLLAMA
+                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / DEEPSEEK / OLLAMA / GROQ / SAMBANOVA / CEREBRAS
                 # =========================================================
-                elif self.llm_provider in ['openai', 'anthropic', 'deepseek', 'ollama']:
+                elif self.llm_provider in ['openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova', 'cerebras']:
                     headers = {
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self.api_key}"
@@ -396,13 +435,19 @@ class BTAgentNode(BTValidation, Node):
                             base_url = 'https://api.anthropic.com'
                         elif self.llm_provider == 'deepseek':
                             base_url = 'https://api.deepseek.com'
-                        else:  # ollama
+                        elif self.llm_provider == 'groq':
+                            base_url = 'https://api.groq.com/openai'
+                        elif self.llm_provider == 'sambanova':
+                            base_url = 'https://api.sambanova.ai'
+                        elif self.llm_provider == 'cerebras':
+                            base_url = 'https://api.cerebras.ai'
+                        else:   # ollama
                             base_url = 'http://localhost:11434'
                     
                     # Build complete endpoint based on provider
                     if self.llm_provider == 'anthropic':
                         endpoint = f"{base_url}/v1/messages"
-                    else:  # openai, deepseek, ollama
+                    else:  # openai, deepseek, ollama, groq, sambanova, cerebras
                         endpoint = f"{base_url}/v1/chat/completions"
                     
                     resp = requests.post(endpoint, headers=headers, json=payload, timeout=TIMEOUT_SEC)

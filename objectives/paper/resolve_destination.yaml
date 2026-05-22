@@ -1,0 +1,32 @@
+objective:
+
+  name: "resolve_destination"
+  
+  description: "A social service robot works at a community clinic reception hall. Overall goal: Assist clinic visitors by validating appointment ID and directly asking them to hand over their things for carry assistance. In this step: The robot must infer the proper destination frame from the visit reason and reach the corresponding area."
+  
+  skills_used:
+    - "Speak using text-to-speech"
+    - "Obtain the navigation frame given a location name, destination description, or routing category (e.g. visit_reason -> destination frame)"
+    - "Navigate to a dynamic destination provided via blackboard (e.g. {detected_person}, {extracted_location})"
+  
+  inputs:
+    - visit_reason
+  
+  outputs:
+    - extracted_location
+  
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+  
+  steps:
+    - step: "Obtain the navigation frame given a location name, destination description, or routing category (e.g. visit_reason -> destination frame)"
+    - step: "Navigate to a dynamic destination provided via blackboard (e.g. {detected_person}, {extracted_location})"
+    - step: "Speak using text-to-speech"
+  
+  constraints:
+    max_navigation_attempts: 6
+  
+  style:
+    - concise

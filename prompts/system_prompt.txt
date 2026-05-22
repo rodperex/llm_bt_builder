@@ -32,9 +32,8 @@ Reason internally in a step-by-step manner, but never reveal that reasoning in t
      MANDATORY CONTRACTS — the generated BT MUST write EXACTLY these variable names to the blackboard,
      using the exact spelling. Do NOT substitute them with different names even if the `steps:` description
      uses other names. Wire the relevant OUTPUT port of the node that produces this data to `{identifier}`.
-     Example: if `outputs: [full_order]`, at least one node must have its output port mapped to
-     `{full_order}`, e.g. `<Ask question="..." answer="{full_order}"/>` or
-     `<Extract interest="..." text="..." extracted_info="{full_order}"/>`.
+    Example: if `outputs: [full_order]`, at least one node must map one of its output ports to
+      `{full_order}`, e.g. `<DICTIONARY_NODE some_output_port="{full_order}"/>`.
      If the steps description suggests splitting into sub-variables (e.g. first_dish, second_dish),
      you may write those too as intermediate variables, but you MUST ALSO write the declared output key.
      Never write only the sub-variables and leave the declared output key unwritten.
@@ -109,6 +108,9 @@ Reason internally in a step-by-step manner, but never reveal that reasoning in t
     - Reason in terms of tick-level progress: in a plain `<Sequence>`, if child *i* keeps returning `RUNNING`, children *i+1..N* are never ticked.
     - Therefore, do not place non-terminating actions in a position that prevents required downstream checks/actions from being ticked.
     - Place non-terminating actions under reactive control (`<ReactiveSequence>` or `<ReactiveFallback>`) together with the relevant checks/conditions.
+    - For continuous behaviors that must stop on a condition, the guard condition must represent STOP/ABORT, not CONTINUE. If you only have a positive progress condition, invert it before using it as the guard.
+    - For `<ReactiveFallback>`, place the stop condition first and the running action second; do not place a positive "keep going" condition as the first child.
+    - For `<Sequence>`, do not place a non-terminating action before later siblings that still need to be ticked; use reactive control or reorder the flow.
     - **`<Repeat num_cycles="-1">` is non-terminating**: it never returns SUCCESS. NEVER place it inside control nodes.
   11. **PRE-RESPONSE SELF-CHECK (MANDATORY, GENERAL)**:
       - Before returning XML, verify all seven checks:

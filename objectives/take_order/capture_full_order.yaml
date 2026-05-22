@@ -1,6 +1,7 @@
 objective:
   name: "capture_full_order"
   description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must ask the customer for their full order and capture the first dish, second dish, and drink."
+  
   outputs:
     - first_dish
     - second_dish

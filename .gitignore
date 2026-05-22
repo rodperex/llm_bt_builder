@@ -3,6 +3,7 @@ config/*.yaml
 prompts/*.txt
 prompts/*.bak
 !prompts/system_prompt.txt
+!prompts/mcp_system_prompt.txt
 prompts/*.json
 xml/*.xml
 objectives/*.txt

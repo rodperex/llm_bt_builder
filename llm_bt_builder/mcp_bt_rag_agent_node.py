@@ -22,6 +22,7 @@ import uuid
 import pathlib
 import sys
 import difflib
+import yaml
 
 import rclpy
 try:
@@ -123,6 +124,7 @@ class MCPRagBTAgent(RagBTAgent):
         self.declare_parameter("mcp_cmd", "")
         self.declare_parameter("mcp_timeout_sec", 2.0)
         self.declare_parameter("mcp_fail_open", True)
+        self.declare_parameter("use_general_context", False)
         self.declare_parameter("use_episodic_mem", False)
         self.declare_parameter("episodic_mem_pool_size", 100)
         self.declare_parameter("episodic_mem_top_k", 5)
@@ -132,6 +134,7 @@ class MCPRagBTAgent(RagBTAgent):
         self.mcp_cmd = str(self.get_parameter("mcp_cmd").value)
         self.mcp_timeout_sec = float(self.get_parameter("mcp_timeout_sec").value)
         self.mcp_fail_open = bool(self.get_parameter("mcp_fail_open").value)
+        self.use_general_context = bool(self.get_parameter("use_general_context").value)
         self.use_episodic_mem = bool(self.get_parameter("use_episodic_mem").value)
         self.episodic_mem_pool_size = int(self.get_parameter("episodic_mem_pool_size").value)
         self.episodic_mem_top_k = int(self.get_parameter("episodic_mem_top_k").value)
@@ -415,21 +418,24 @@ class MCPRagBTAgent(RagBTAgent):
         if not self.mcp_client:
             return ""
         try:
-            capabilities = self.mcp_client.call_tool("get_capabilities", {})
-            snapshot = self.mcp_client.call_tool("get_mission_snapshot", {})
+            capabilities = self.mcp_client.call_tool("get_capabilities", {}) if self.use_general_context else {}
+            snapshot = self.mcp_client.call_tool("get_mission_snapshot", {}) if self.use_general_context else {}
             failures = self.mcp_client.call_tool("get_failure_history", {"limit": 20}) if include_failures else {"items": []}
             episodic = self._retrieve_bt_episodic_memories(objective, include_failures)
             self._log_selected_episodic_memories(objective, episodic, include_failures)
 
-            return (
-                "\n\n# MCP_CONTEXT (read-only runtime)\n"
-                f"mcp_capabilities: {json.dumps(capabilities, ensure_ascii=True)}\n"
-                f"mcp_mission_snapshot: {json.dumps(snapshot, ensure_ascii=True)}\n"
-                f"mcp_recent_failures: {json.dumps(failures, ensure_ascii=True)}\n"
-                f"mcp_bt_success_episodic: {json.dumps(episodic['success_examples'], ensure_ascii=True)}\n"
-                f"mcp_bt_failure_episodic: {json.dumps(episodic['failure_examples'], ensure_ascii=True)}\n"
-                "# Use this as grounding only; keep using available_blackboard_vars and declared outputs strictly.\n"
-            )
+            mcp_context = {
+                "mcp_context": {
+                    "note": "read-only runtime grounding; prefer declared inputs/outputs and available_blackboard_vars",
+                    "capabilities": capabilities,
+                    "mission_snapshot": snapshot,
+                    "recent_failures": failures,
+                    "bt_success_episodic": episodic["success_examples"],
+                    "bt_failure_episodic": episodic["failure_examples"],
+                }
+            }
+
+            return "\n" + yaml.safe_dump(mcp_context, sort_keys=False, allow_unicode=False)
         except Exception as exc:
             self.get_logger().warn(f"MCP query failed: {exc}")
             if self.mcp_fail_open:

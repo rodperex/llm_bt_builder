@@ -47,7 +47,7 @@ class RagBTAgent(BTValidation, Node):
         self.get_logger().info(f"🛠️ Starting RAG Node...")
 
         # 1. PARAMETERS
-        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek, groq, sambanova, cerebras
         self.declare_parameter('model_id', 'gemini-2.0-flash-lite')
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
@@ -73,7 +73,8 @@ class RagBTAgent(BTValidation, Node):
                 'deepseek': ['DEEPSEEK_API_KEY'],
                 'ollama': ['LLM_API_KEY'],
                 'groq': ['GROQ_API_KEY'],
-                'sambanova': ['SAMBANOVA_API_KEY']
+                'sambanova': ['SAMBANOVA_API_KEY'],
+                'cerebras': ['CEREBRAS_API_KEY']
             }
             
             env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
@@ -226,6 +227,25 @@ class RagBTAgent(BTValidation, Node):
                     timeout=TIMEOUT,
                     max_retries=2
                 )
+            elif self.llm_provider == 'cerebras':
+                self.get_logger().info(f"🧠 Configuring Cerebras Cloud ({self.model_id})...")
+                base_url = None
+                if self.api_url and self.api_url != '':
+                    base_url = self.api_url.rstrip('/')
+                    if not base_url.endswith('/v1'):
+                        base_url = base_url + '/v1'
+                else:
+                    base_url = "https://api.cerebras.ai/v1"
+                
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base_url,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2
+                )
             else:
                 self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
                 return None
@@ -313,7 +333,24 @@ class RagBTAgent(BTValidation, Node):
             data = yaml.safe_load(yaml_content)
             documents = []
             for node in data.get('bt_nodes', []):
-                search_content = f"Tool: {node['name']} Type: {node['type']} Desc: {node['description']}"
+                ports = []
+                for port in node.get('ports', []):
+                    if not isinstance(port, dict):
+                        continue
+                    ports.append(
+                        f"Port: {port.get('name', '')} Dir: {port.get('direction', '')} "
+                        f"Type: {port.get('type', '')} Desc: {port.get('description', '')}"
+                    )
+
+                returns = []
+                for status, description in node.get('return', {}).items():
+                    returns.append(f"Return: {status} Desc: {description}")
+
+                search_content = (
+                    f"Tool: {node['name']} Type: {node['type']} Desc: {node['description']}\n"
+                    f"Ports: {' | '.join(ports)}\n"
+                    f"Returns: {' | '.join(returns)}"
+                )
                 node_yaml = yaml.dump(node, sort_keys=False)
                 documents.append(Document(page_content=search_content, metadata={"raw_yaml": node_yaml}))
             return Chroma.from_documents(documents, self.embeddings, collection_name="temp_skills")
@@ -323,6 +360,82 @@ class RagBTAgent(BTValidation, Node):
 
     def parse_full_specs(self, yaml_content):
         return self._parse_capability_specs(yaml_content)
+
+    def _sanitize_rag_query(self, objective_text):
+        """Remove non-step MCP runtime context from retrieval query."""
+        if not isinstance(objective_text, str):
+            return str(objective_text)
+
+        # Preferred path: structured YAML key injected by MCPRagBTAgent.
+        try:
+            parsed = yaml.safe_load(objective_text)
+            if isinstance(parsed, dict) and 'mcp_context' in parsed:
+                parsed.pop('mcp_context', None)
+                cleaned = yaml.safe_dump(parsed, sort_keys=False, allow_unicode=False)
+                return cleaned.strip()
+        except Exception:
+            pass
+
+        # MCP context is appended as a read-only runtime block for prompting,
+        # but it is not useful for capability retrieval.
+        marker = "\n# MCP_CONTEXT"
+        idx = objective_text.find(marker)
+        if idx != -1:
+            return objective_text[:idx].rstrip()
+        return objective_text.strip()
+
+    def _build_rag_queries(self, objective_text):
+        """Build multiple focused retrieval queries from the structured objective."""
+        sanitized = self._sanitize_rag_query(objective_text)
+        queries = []
+
+        def add_query(text):
+            if not isinstance(text, str):
+                return
+            normalized = " ".join(text.split()).strip()
+            if normalized and normalized not in queries:
+                queries.append(normalized)
+
+        add_query(sanitized)
+
+        try:
+            data = yaml.safe_load(sanitized)
+        except Exception:
+            return queries
+
+        if not isinstance(data, dict):
+            return queries
+
+        objective = data.get('objective', data)
+        if not isinstance(objective, dict):
+            return queries
+
+        add_query(objective.get('description', ''))
+
+        for skill in objective.get('skills_used', []):
+            add_query(str(skill))
+
+        for entry in objective.get('steps', []):
+            if isinstance(entry, dict):
+                add_query(str(entry.get('step', '')))
+            elif isinstance(entry, str):
+                add_query(entry)
+
+        return queries
+
+    def _retrieve_relevant_nodes(self, vector_db, objective_text, top_k):
+        queries = self._build_rag_queries(objective_text)
+        selected = []
+        seen_raw_yaml = set()
+
+        for query in queries:
+            for result in vector_db.similarity_search(query, top_k):
+                raw_yaml = result.metadata.get('raw_yaml', '')
+                if raw_yaml and raw_yaml not in seen_raw_yaml:
+                    seen_raw_yaml.add(raw_yaml)
+                    selected.append(result)
+
+        return queries, selected
 
     def _extract_known_blackboard_vars(self, objective_text):
         """Collect blackboard vars that are readable at step start."""
@@ -439,6 +552,27 @@ class RagBTAgent(BTValidation, Node):
 
         return policy
 
+    def _extract_allow_forced_plan_fail(self, objective_text):
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return False
+
+        found_values = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'allow_forced_plan_fail':
+                        found_values.append(bool(v))
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+        return any(found_values)
+
     def generate_bt_callback(self, request, response):
         return self._run_agentic_pipeline(request, response, is_fix=False)
 
@@ -458,15 +592,30 @@ class RagBTAgent(BTValidation, Node):
         # 1. DATA PREPARATION
         full_node_specs = self.parse_full_specs(request.bt_nodes_yaml)
         known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
         required_output_vars = self._extract_required_output_vars(request.objective)
         recovery_policy = self._extract_recovery_policy(request.objective)
+        allow_forced_plan_fail = self._extract_allow_forced_plan_fail(request.objective)
 
         # 2. RAG (Only done once at the beginning)
         vector_db = self.create_vector_store(request.bt_nodes_yaml)
         if not vector_db:
             response.success = False; response.message = "Error indexing YAML"; return response
 
-        results = vector_db.similarity_search(request.objective, K)
+        rag_query = self._sanitize_rag_query(request.objective)
+        removed_mcp_context = len(rag_query) < len(request.objective)
+        rag_queries, results = self._retrieve_relevant_nodes(vector_db, request.objective, K)
+        rag_log = (
+            "\n========== RAG INPUT START =========="
+            f"\nK: {K}"
+            "\nRetrieval query source: aggregated objective queries"
+            f"\nMCP context removed: {removed_mcp_context}"
+            f"\nOriginal chars: {len(request.objective)} | Query chars: {len(rag_query)}"
+            f"\nPrimary retrieval query:\n{rag_query}"
+            f"\nFocused queries ({len(rag_queries)}):\n- {'\n- '.join(rag_queries)}"
+            "\n=========== RAG INPUT END ==========="
+        )
+        self.get_logger().info(rag_log)
 
         filtered_yaml_str = "bt_nodes:\n"
         found_names = []
@@ -549,73 +698,10 @@ class RagBTAgent(BTValidation, Node):
                     continue
 
                 # B. BehaviorTree Structure Validation
-                is_valid_structure, struct_msg = self.validate_xml_bt(xml_str)
+                is_valid_structure, struct_msg, struct_hint = self.validate_xml_bt(xml_str)
                 if not is_valid_structure:
                     self.get_logger().warn(f"⚠️ BT Structure Error: {struct_msg}")
-                    repair_hint = (
-                        "Return a COMPLETE XML from scratch. "
-                        "Do not emit empty structural nodes. "
-                        "Every control node must have the required minimum children, "
-                        "every decorator must wrap exactly one child, "
-                        "and root/BehaviorTree arity constraints must be satisfied. "
-                        "Never use self-closing structural tags for control/decorator nodes."
-                    )
-
-                    decorator_match = re.search(
-                        r"Decorator <([^>]+)> must have exactly (\d+) child(?:ren)?, found (\d+)",
-                        struct_msg,
-                    )
-                    control_match = re.search(
-                        r"Control node <([^>]+)> must have at least (\d+) child(?:ren)?, found (\d+)",
-                        struct_msg,
-                    )
-                    root_match = re.search(
-                        r"<(root|BehaviorTree)> must have exactly (\d+) child(?:ren)?, found (\d+)",
-                        struct_msg,
-                    )
-                    zero_child_match = re.search(
-                        r"<([^>]+)> should not have children, found (\d+)",
-                        struct_msg,
-                    )
-                    req_attr_match = re.search(
-                        r"<([^>]+)> is missing required attribute '([^']+)'",
-                        struct_msg,
-                    )
-
-                    if decorator_match:
-                        tag, required, found = decorator_match.groups()
-                        repair_hint = (
-                            f"Decorator <{tag}> requires exactly {required} child, but found {found}. "
-                            f"Wrap one valid subtree inside <{tag}> ... </{tag}>. "
-                            f"Never output <{tag}/> or <{tag}></{tag}>."
-                        )
-                    elif control_match:
-                        tag, required, found = control_match.groups()
-                        repair_hint = (
-                            f"Control node <{tag}> requires at least {required} child, but found {found}. "
-                            f"Add valid child nodes inside <{tag}> ... </{tag}> or remove that wrapper if unnecessary. "
-                            f"Never output <{tag}/> or <{tag}></{tag}>."
-                        )
-                    elif root_match:
-                        tag, required, found = root_match.groups()
-                        repair_hint = (
-                            f"<{tag}> requires exactly {required} child, but found {found}. "
-                            "Rebuild the top skeleton as <root><BehaviorTree ID=\"MainTree\"> ... </BehaviorTree></root> "
-                            "with exactly one child at each structural root level."
-                        )
-                    elif zero_child_match:
-                        tag, found = zero_child_match.groups()
-                        repair_hint = (
-                            f"<{tag}> must be a leaf structural wrapper with no children, but found {found}. "
-                            f"Remove all children from <{tag}> and keep it as an empty wrapper tag only if allowed by BT.CPP."
-                        )
-                    elif req_attr_match:
-                        tag, attr = req_attr_match.groups()
-                        repair_hint = (
-                            f"<{tag}> is missing required attribute '{attr}'. "
-                            f"Add '{attr}' explicitly with a valid value before returning XML."
-                        )
-
+                    repair_hint = struct_hint
                     if struct_msg == last_structure_error:
                         repeated_structure_error_count += 1
                     else:
@@ -647,78 +733,18 @@ class RagBTAgent(BTValidation, Node):
                     continue
 
                 # C. Semantic Validation
-                is_valid_bt, bt_msg = self.validate_bt_semantics(
+                is_valid_bt, bt_msg, bt_hint = self.validate_bt_semantics(
                     xml_str,
                     full_node_specs,
                     known_bb_vars,
+                    known_bb_var_types,
                     required_output_vars,
                     recovery_policy,
+                    allow_forced_plan_fail,
                 )
                 if not is_valid_bt:
                     self.get_logger().warn(f"⚠️ BT Semantic Error: {bt_msg}")
-                    # Targeted feedback helps the model repair invalid blackboard bindings.
-                    repair_hint = (
-                        "Use only valid nodes/ports from capabilities and return a complete XML from scratch. "
-                        "Before responding, run this internal checklist: "
-                        "(1) every leaf node exists in capabilities, "
-                        "(2) every attribute is an allowed port for that node, "
-                        "(3) each blackboard attribute uses either one token {var} or a plain literal."
-                    )
-                    if "malformed blackboard reference" in bt_msg or "invalid blackboard key" in bt_msg:
-                        repair_hint = (
-                            "Use exactly ONE blackboard variable per attribute (e.g., text=\"{full_order}\"). "
-                            "Do NOT use concatenations like \"{a},{b}\" or \"{x};{y}\". "
-                            "Do NOT mix literals with blackboard placeholders in one attribute "
-                            "(invalid: text=\"Chef, order is {a} and {b}\"). "
-                            "If you need to say multiple variables, split into multiple nodes "
-                            "(e.g., one Speak literal + one Speak per variable, or Ask/Extract to build a single variable first)."
-                        )
-                    elif "reads unknown blackboard key" in bt_msg:
-                        repair_hint = (
-                            "Only read variables declared in objective inputs/available_blackboard_vars, "
-                            "or variables produced earlier in the same BT step. "
-                            "If you need this value, either add the correct input key or write it before reading it. "
-                            "Do not invent helper variables like combined_order unless a previous node writes them."
-                        )
-                    elif "did not write required output" in bt_msg:
-                        repair_hint = (
-                            "The step objective declares mandatory outputs. "
-                            "Map the corresponding output port(s) to those exact blackboard keys before step completion."
-                        )
-                    elif "does NOT exist in the capabilities YAML" in bt_msg:
-                        repair_hint = (
-                            "You used a node that is not in capabilities. "
-                            "Replace every unknown node with valid capabilities-only nodes and redesign the flow without helper/invented nodes. "
-                            "If data transformation is needed, use only existing node outputs and objective-declared variables."
-                        )
-                    elif "recoverable checks" in bt_msg or "Recovery branch" in bt_msg:
-                        repair_hint = (
-                            "Recovery policy is declared in objective.recovery_policy. "
-                            "Use explicit branching with success and recovery paths "
-                            "(Fallback/ReactiveFallback), and include loop control (RetryUntilSuccessful/Repeat) "
-                            "when loop_until_success is true. "
-                            "If recovery_policy.retry_attempts is provided, set RetryUntilSuccessful num_attempts to that exact value."
-                        )
-                    elif "must not use RetryUntilSuccessful" in bt_msg:
-                        repair_hint = (
-                            "This step is not a recovery-loop step. Remove RetryUntilSuccessful and keep a plain Sequence "
-                            "unless objective.recovery_policy.required=true or loop_until_success=true."
-                        )
-                    elif "can only return RUNNING" in bt_msg and "<Sequence>" in bt_msg:
-                        repair_hint = (
-                            "A node that only returns RUNNING cannot appear before required later siblings "
-                            "inside a plain Sequence. Reorder so it is last, or wrap with ReactiveSequence/ReactiveFallback "
-                            "so downstream checks/actions keep being ticked."
-                        )
-                    elif "can only return RUNNING" in bt_msg and "<ReactiveSequence>" in bt_msg:
-                        repair_hint = (
-                            "A node that only returns RUNNING inside a ReactiveSequence blocks all following siblings. "
-                            "ReactiveSequence stops at the first RUNNING child and does not advance further. "
-                            "If you want to keep ticking a condition while an action runs, use "
-                            "ReactiveFallback with the condition FIRST: "
-                            "<ReactiveFallback> <IsCondition/> <LongRunningAction/> </ReactiveFallback>."
-                        )
-
+                    repair_hint = bt_hint
                     if bt_msg == last_semantic_error:
                         repeated_semantic_error_count += 1
                     else:
@@ -782,13 +808,24 @@ class RagBTAgent(BTValidation, Node):
     def validate_xml_bt(self, xml_string):
         return super().validate_xml_bt(xml_string)
 
-    def validate_bt_semantics(self, xml_string, node_specs, known_bb_vars=None, required_outputs=None, recovery_policy=None):
+    def validate_bt_semantics(
+        self,
+        xml_string,
+        node_specs,
+        known_bb_vars=None,
+        known_bb_var_types=None,
+        required_outputs=None,
+        recovery_policy=None,
+        allow_forced_plan_fail=None,
+    ):
         return super().validate_bt_semantics(
             xml_string,
             node_specs,
             known_bb_vars,
+            known_bb_var_types,
             required_outputs,
             recovery_policy,
+            allow_forced_plan_fail,
         )
 
 def main(args=None):
