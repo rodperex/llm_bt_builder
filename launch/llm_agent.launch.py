@@ -30,6 +30,7 @@ def generate_launch_description():
 
     model_arg = DeclareLaunchArgument(
         'model',
+        # default_value='gemini-3.5-flash',
         # default_value='command-r:35b',
         # default_value='qwen2.5:7b',
         # default_value='Meta-Llama-3.3-70B-Instruct',
@@ -151,6 +152,18 @@ def generate_launch_description():
         description='Device for HuggingFace embeddings: cpu, cuda, or auto.'
     )
 
+    rag_arg = DeclareLaunchArgument(
+        'rag',
+        default_value='true',
+        description='Enable RAG node retrieval. If false, use the full robot node catalog without retrieval filtering.'
+    )
+
+    metrics_arg = DeclareLaunchArgument(
+        'metrics',
+        default_value='true',
+        description='Enable generation metrics for RAG-based BT agents.'
+    )
+
     # RAG node
     rag_node = Node(
         package='llm_bt_builder',
@@ -165,7 +178,9 @@ def generate_launch_description():
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
             'prompt_file': LaunchConfiguration('prompt_file'),
-            'embeddings_device': LaunchConfiguration('embeddings_device')
+            'embeddings_device': LaunchConfiguration('embeddings_device'),
+            'rag': LaunchConfiguration('rag'),
+            'metrics': LaunchConfiguration('metrics')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'rag'"])
@@ -187,6 +202,8 @@ def generate_launch_description():
             'api_key': LaunchConfiguration('key'),
             'prompt_file': LaunchConfiguration('prompt_file'),
             'embeddings_device': LaunchConfiguration('embeddings_device'),
+            'rag': LaunchConfiguration('rag'),
+            'metrics': LaunchConfiguration('metrics'),
             'mcp_enabled': LaunchConfiguration('mcp_enabled'),
             'mcp_cmd': LaunchConfiguration('mcp_cmd'),
             'mcp_timeout_sec': LaunchConfiguration('mcp_timeout_sec'),
@@ -233,7 +250,8 @@ def generate_launch_description():
             'model_id': LaunchConfiguration('model'),
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
-            'prompt_file': LaunchConfiguration('prompt_file')
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'rag': LaunchConfiguration('rag')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'agentic'"])
@@ -249,6 +267,8 @@ def generate_launch_description():
         agent_type_arg,
         prompt_file_arg,
         embeddings_device_arg,
+        rag_arg,
+        metrics_arg,
         mcp_enabled_arg,
         mcp_cmd_arg,
         mcp_timeout_arg,

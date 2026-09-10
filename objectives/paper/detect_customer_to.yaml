@@ -1,0 +1,37 @@
+
+objective:
+  name: "detect_customer_to"
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must spin in place until it identifies a customer ready to order or a time limit (timeout) is reached. Once the customer is detected, the robot should navigate to the customer. If the customer is not detected within the timeout, the robot should force a controlled plan fail"
+  skills_used:
+    - "Set the perception system to search for a specific target class"
+    - "Detect and identify a target entity (person, object)"
+    - "Spin in place"
+    - "Navigate to a dynamic destination provided via blackboard"
+    - "Force a controlled plan fail only when the current mission step explicitly authorizes it after bounded retries"
+
+
+  outputs:
+    - detected_customer
+
+  steps:
+    - step: "Set the perception system to search for a specific target class"
+    - step: "Spin in place"
+    - step: "Detect and identify a target entity (person, object) within the timeout"
+    - step: "Navigate to the detected customer"
+  
+  allow_forced_plan_fail: true
+
+  style:
+    - attentive
+
+  recovery_policy:
+    required: true
+    loop_until_success: false
+    timeout: 60
+
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available locations are:
+    - main_kitchen
+    - bar

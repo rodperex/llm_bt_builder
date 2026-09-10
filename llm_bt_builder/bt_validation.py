@@ -368,12 +368,11 @@ class BTValidation:
                     min_children_by_tag = {
                         'IfThenElse': 3,
                     }
-                    min_children = min_children_by_tag.get(elem.tag, 2)
+                    min_children = min_children_by_tag.get(elem.tag, 1)
                     if len(children) < min_children:
                         return False, (
                             f"Control node <{elem.tag}> must have at least {min_children} children, "
-                            f"found {len(children)}. Control nodes with a single child are structurally valid "
-                            f"in XML but semantically pointless in this project."
+                            f"found {len(children)}."
                         ), (
                             f"{structural_base_hint} "
                             f"Add valid child nodes inside <{elem.tag}> ... </{elem.tag}> "
@@ -496,67 +495,83 @@ class BTValidation:
                     value = str(elem.attrib[attr]).strip()
                     if '{' in value or '}' in value:
                         refs = re.findall(r'\{[^{}]+\}', value)
-                        if len(refs) != 1 or refs[0] != value:
+                        concat_ref_pattern = r'^\s*\{[^{}]+\}\s*(;\s*\{[^{}]+\}\s*)+$'
+
+                        if len(refs) == 1 and refs[0] == value:
+                            ref_values = refs
+                        elif re.match(concat_ref_pattern, value):
+                            ref_values = refs
+                        elif refs:
+                            template_without_refs = re.sub(r'\{[^{}]+\}', '', value)
+                            if '{' in template_without_refs or '}' in template_without_refs:
+                                return False, (
+                                    f"Node <{elem.tag}> has a malformed template in attribute '{attr}': '{value}'. "
+                                    "Templates must use complete placeholders."
+                                ), (
+                                    "Use complete placeholders and avoid partial placeholders."
+                                )
+                            ref_values = refs
+                        else:
                             return False, (
                                 f"Node <{elem.tag}> has malformed blackboard reference in port '{attr}': '{value}'. "
-                                f"Use exactly one blackboard variable like '{{my_var}}', or a plain literal."
+                                f"Use exactly one blackboard variable like '{{my_var}}', a semicolon-separated list like '{{a}};{{b}};{{c}}', or a plain literal."
                             ), (
-                                "Use exactly ONE blackboard variable per attribute "
-                                "(e.g., text=\"{full_order}\"). "
-                                "Do NOT mix literals with placeholders or concatenate variables."
+                                "Use one full blackboard reference (e.g., text=\"{full_order}\") "
+                                "or a semicolon-separated list of full references (e.g., \"{a};{b};{c}\"). "
+                                "Do NOT mix partial placeholders and literals in the same token."
                             )
+                        for ref in ref_values:
+                            bb_key = ref[1:-1]
+                            if ',' in bb_key or ';' in bb_key:
+                                return False, (
+                                    f"Node <{elem.tag}> port '{attr}' uses an invalid blackboard key '{bb_key}'. "
+                                    "Do not put multiple keys inside one {}. "
+                                    "Use separate references like '{a};{b};{c}'."
+                                ), (
+                                    "Use one key per placeholder. Valid forms are '{key}' and '{k1};{k2};{k3}'. "
+                                    "Invalid forms include '{k1;k2}' and '{k1,k2}'."
+                                )
 
-                        bb_key = value[1:-1]
-                        if ',' in bb_key or ';' in bb_key:
-                            return False, (
-                                f"Node <{elem.tag}> port '{attr}' uses an invalid blackboard key '{bb_key}'. "
-                                f"Do not concatenate multiple variables inside one {{}}. "
-                                f"Write to a single combined variable first, then pass that variable."
-                            ), (
-                                "Write to a single combined variable first using a dedicated node, "
-                                "then pass that single variable as a blackboard reference."
+                            is_read_ref = (attr in input_ports) or (attr not in output_ports)
+                            if is_read_ref and bb_key not in known_bb_vars and bb_key not in produced_in_tree:
+                                return False, (
+                                    f"Node <{elem.tag}> reads unknown blackboard key '{bb_key}' in input port '{attr}'. "
+                                    f"Declare it in objective inputs/available_blackboard_vars or write it earlier in this step."
+                                ), (
+                                    "Only read variables from objective inputs/available_blackboard_vars "
+                                    "or variables written earlier in this step. "
+                                    "Do not invent helper variables — declare them in inputs or write them first."
+                                )
+
+                            port_type = port_types.get(attr)
+                            known_type = known_bb_var_types.get(bb_key)
+                            if known_type and port_type and known_type != port_type:
+                                return False, (
+                                    f"Blackboard key '{{{bb_key}}}' is declared as type '{known_type}' "
+                                    f"in available_blackboard_vars_typed, but <{elem.tag}>.{attr} expects '{port_type}'. "
+                                    "This causes BT port type conflicts at runtime."
+                                ), (
+                                    f"Use a different key for <{elem.tag}>.{attr} or align the port type with "
+                                    f"the declared blackboard type '{known_type}'."
+                                )
+
+                            ok_type, type_err = self._register_blackboard_key_type(
+                                key_types,
+                                bb_key,
+                                port_type,
+                                elem.tag,
+                                attr,
                             )
+                            if not ok_type:
+                                return False, (
+                                    f"{type_err} This causes BT port type conflicts at runtime."
+                                ), (
+                                    f"Use different blackboard keys for incompatible port types, "
+                                    f"or align node port types when sharing '{{{bb_key}}}'."
+                                )
 
-                        is_read_ref = (attr in input_ports) or (attr not in output_ports)
-                        if is_read_ref and bb_key not in known_bb_vars and bb_key not in produced_in_tree:
-                            return False, (
-                                f"Node <{elem.tag}> reads unknown blackboard key '{bb_key}' in input port '{attr}'. "
-                                f"Declare it in objective inputs/available_blackboard_vars or write it earlier in this step."
-                            ), (
-                                "Only read variables from objective inputs/available_blackboard_vars "
-                                "or variables written earlier in this step. "
-                                "Do not invent helper variables — declare them in inputs or write them first."
-                            )
-
-                        port_type = port_types.get(attr)
-                        known_type = known_bb_var_types.get(bb_key)
-                        if known_type and port_type and known_type != port_type:
-                            return False, (
-                                f"Blackboard key '{{{bb_key}}}' is declared as type '{known_type}' "
-                                f"in available_blackboard_vars_typed, but <{elem.tag}>.{attr} expects '{port_type}'. "
-                                "This causes BT port type conflicts at runtime."
-                            ), (
-                                f"Use a different key for <{elem.tag}>.{attr} or align the port type with "
-                                f"the declared blackboard type '{known_type}'."
-                            )
-
-                        ok_type, type_err = self._register_blackboard_key_type(
-                            key_types,
-                            bb_key,
-                            port_type,
-                            elem.tag,
-                            attr,
-                        )
-                        if not ok_type:
-                            return False, (
-                                f"{type_err} This causes BT port type conflicts at runtime."
-                            ), (
-                                f"Use different blackboard keys for incompatible port types, "
-                                f"or align node port types when sharing '{{{bb_key}}}'."
-                            )
-
-                        if attr in output_ports:
-                            produced_in_tree.add(bb_key)
+                            if attr in output_ports:
+                                produced_in_tree.add(bb_key)
                     elif attr in output_ports and value:
                         literal_key = value.strip()
                         if literal_key.startswith('{') and literal_key.endswith('}'):

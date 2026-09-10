@@ -84,10 +84,12 @@ class AgenticBTNode(BTValidation, Node):
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
         self.declare_parameter('prompt_file', 'system_prompt.txt')
+        self.declare_parameter('rag', True)
 
         self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.model_id     = self.get_parameter('model_id').value
         self.api_url      = self.get_parameter('api_url').value
+        self.rag_enabled  = bool(self.get_parameter('rag').value)
 
         # Smart API-key detection (env vars as fallback)
         param_key = self.get_parameter('api_key').value
@@ -265,6 +267,8 @@ class AgenticBTNode(BTValidation, Node):
                 if ok:
                     return "VALID: BT semantics are correct."
                 return f"ERROR: {msg}. {hint}"
+            except Exception as e:
+                return f"ERROR: Semantic validation failed — {e}"
 
         # ── Tool 4: submit ─────────────────────────────────────────────────
         def submit_bt_xml(xml: str) -> str:
@@ -501,27 +505,35 @@ class AgenticBTNode(BTValidation, Node):
         recovery_policy = self._extract_recovery_policy(request.objective)
 
         # 2. RAG — retrieve top-K semantically relevant nodes
-        vector_db = self._create_vector_store(request.bt_nodes_yaml)
-        if not vector_db:
-            response.success = False
-            response.message = "Error indexing YAML"
-            return response
+        if self.rag_enabled:
+            vector_db = self._create_vector_store(request.bt_nodes_yaml)
+            if not vector_db:
+                response.success = False
+                response.message = "Error indexing YAML"
+                return response
 
-        results       = vector_db.similarity_search(request.objective, K)
-        filtered_yaml = "bt_nodes:\n"
-        found_names   = []
-        for res in results:
-            raw = res.metadata['raw_yaml']
-            filtered_yaml += "\n".join("  " + line for line in raw.split('\n')) + "\n"
-            found_names.append(raw.splitlines()[0])
-        self.get_logger().info(f"🔎 RAG selected: {found_names}")
+            results       = vector_db.similarity_search(request.objective, K)
+            filtered_yaml = "bt_nodes:\n"
+            found_names   = []
+            for res in results:
+                raw = res.metadata['raw_yaml']
+                filtered_yaml += "\n".join("  " + line for line in raw.split('\n')) + "\n"
+                found_names.append(raw.splitlines()[0])
+            self.get_logger().info(f"🔎 RAG selected: {found_names}")
+        else:
+            vector_db = None
+            filtered_yaml = request.bt_nodes_yaml or "bt_nodes:\n"
+            found_names = list(full_node_specs.keys())
+            self.get_logger().info(
+                f"🔎 RAG disabled: using full catalog ({len(found_names)} nodes) without retrieval filtering")
 
         # 3. Build system prompt
         raw_template = self._load_prompt_template()
         if not raw_template:
             response.success = False
             response.message = "Prompt file missing"
-            vector_db.delete_collection()
+            if vector_db is not None:
+                vector_db.delete_collection()
             return response
 
         bt_std = ("## Control Nodes\n" + self.bt_control_nodes_yaml +

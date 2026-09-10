@@ -23,6 +23,7 @@ import pathlib
 import sys
 import difflib
 import yaml
+import xml.etree.ElementTree as ET
 
 import rclpy
 try:
@@ -442,9 +443,89 @@ class MCPRagBTAgent(RagBTAgent):
                 return ""
             raise
 
+    def _collapse_single_child_control_nodes(self, bt_xml: str):
+        # Remove redundant control wrappers that have exactly one child.
+        if not isinstance(bt_xml, str) or not bt_xml.strip():
+            return bt_xml, 0, []
+
+        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+        root = ET.fromstring(bt_xml, parser=parser)
+
+        collapsible_tags = {
+            "Sequence",
+            "SequenceWithMemory",
+            "ReactiveSequence",
+            "Fallback",
+            "ReactiveFallback",
+        }
+
+        def collapse_under(parent):
+            collapsed = 0
+            collapsed_tags = []
+            index = 0
+            while index < len(parent):
+                child = parent[index]
+                child_collapsed, child_tags = collapse_under(child)
+                collapsed += child_collapsed
+                collapsed_tags.extend(child_tags)
+
+                if child.tag not in collapsible_tags:
+                    index += 1
+                    continue
+
+                element_children = [c for c in list(child) if isinstance(c.tag, str)]
+                if len(element_children) != 1:
+                    index += 1
+                    continue
+
+                only_child = element_children[0]
+                parent[index] = only_child
+                collapsed += 1
+                collapsed_tags.append(str(child.tag))
+                # Re-check this index in case replacing creates a new collapsible single-child node.
+
+            return collapsed, collapsed_tags
+
+        total_collapsed, collapsed_tags = collapse_under(root)
+
+        # Preserve original formatting when no structural cleanup was applied.
+        if total_collapsed == 0:
+            return bt_xml, total_collapsed, collapsed_tags
+
+        # Re-indent only after an actual tree rewrite.
+        try:
+            ET.indent(root, space="  ")
+        except Exception:
+            pass
+
+        cleaned_xml = ET.tostring(root, encoding="unicode")
+        return cleaned_xml, total_collapsed, collapsed_tags
+
+    def _postprocess_generated_bt_xml(self, bt_xml: str, is_fix: bool):
+        del is_fix
+        try:
+            cleaned_xml, collapsed_nodes, collapsed_tags = self._collapse_single_child_control_nodes(bt_xml)
+            if collapsed_nodes > 0:
+                self.get_logger().info(
+                    f"[bt_cleanup] collapsed_single_child_control_nodes={collapsed_nodes} tags={collapsed_tags}")
+            else:
+                self.get_logger().debug("[bt_cleanup] no single-child Sequence/Fallback wrappers found")
+
+            return cleaned_xml, {
+                "bt_cleanup_collapsed_count": int(collapsed_nodes),
+                "bt_cleanup_collapsed_tags": list(collapsed_tags),
+            }
+        except Exception as cleanup_exc:
+            self.get_logger().warn(f"[bt_cleanup] cleanup skipped due to error: {cleanup_exc}")
+            return bt_xml, {
+                "bt_cleanup_collapsed_count": 0,
+                "bt_cleanup_collapsed_tags": [],
+            }
+
     def _run_agentic_pipeline(self, request, response, is_fix):
         # Inject MCP context before calling the original pipeline.
         # Restore original request afterwards to avoid side effects across retries.
+        self._begin_generation_metrics(request, is_fix, pipeline='mcp_rag')
         original_objective = request.objective
         try:
             request.objective = request.objective + self._build_mcp_block(
@@ -452,6 +533,11 @@ class MCPRagBTAgent(RagBTAgent):
                 include_failures=is_fix,
             )
             return super()._run_agentic_pipeline(request, response, is_fix)
+        except Exception as exc:
+            response.success = False
+            response.message = f"MCP context preparation failed: {exc}"
+            self._finalize_generation_metrics(response)
+            raise
         finally:
             request.objective = original_objective
 

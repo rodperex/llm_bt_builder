@@ -103,7 +103,24 @@ Reason internally in a step-by-step manner, but never reveal that reasoning in t
     - Condition nodes are boolean checks. Use them to gate behavior (typically inside `Sequence`, `Fallback`, or with decorators like `Inverter`).
     - Do not treat condition checks as standalone "do-and-continue" actions.
     - If the objective implies retry, correction, or recovery after a failed check, model explicit success and failure branches.
-    - For recoverable checks, NEVER place a condition as a plain linear gate followed only by a success action. Model a control-flow branch: success child + failure recovery child.
+    - For recoverable checks (Condition nodes or Action nodes that return SUCCESS/FAILURE to verify a status, decision, or check outcome), NEVER place the node as a plain linear gate followed only by a success action in a Sequence. Instead, model an explicit control-flow branch using a `Fallback` node. The check node itself MUST be the first child of the success branch of the Fallback, like this:
+      ```xml
+      <Fallback name="check_fallback">
+        <Sequence name="success_branch">
+          <CHECK_NODE .../> <!-- The check/decision node goes here -->
+          <SUCCESS_ACTION .../>
+        </Sequence>
+        <Sequence name="recovery_branch">
+          <RECOVERY_ACTION .../>
+        </Sequence>
+      </Fallback>
+      ```
+    - Do NOT place the check/decision node outside/before the Fallback and then use another node (like checking a blackboard variable) inside the Fallback to branch. If the check/decision node returns FAILURE, it will immediately abort any parent Sequence before the Fallback is ever ticked. The check/decision node itself must serve as the first node in the success branch of the Fallback.
+    - **CRITICAL (STEP SPLITTING / CONDITIONAL STEPS)**: Often, the objective splits conditional logic into two sequential steps:
+      - Step 1: Perform a check/decision (e.g. 'Check item availability').
+      - Step 2: 'If check succeeds, do X; otherwise, do Y'.
+      - You MUST NOT map these to two sequential siblings in a Sequence (like `<CHECK_NODE>` followed by a `<Fallback>`). Instead, you MUST merge them into a single `<Fallback>` structure. The check/decision node (`<CHECK_NODE>`) MUST be the first child of the success branch of the `<Fallback>`, followed by the success actions. The failure/recovery actions MUST go in the second branch of the `<Fallback>`.
+    - **CRITICAL (NO REPEATING CHECKS IN RECOVERY)**: You MUST NOT place or repeat the check/decision node (`<CHECK_NODE .../>`) in the second/recovery branch of the `<Fallback>`. Since the check node returns FAILURE when the check fails, calling it again in the recovery branch will make the entire recovery branch fail immediately, preventing any recovery/failure actions (like `Speak` or `ForcePlanFail`) from executing. Instead, you MUST bind any output ports (e.g., error details, missing items, or status variables) to the blackboard in the first/success branch's check node, and then use those blackboard variables directly in the recovery branch actions without calling the check node again.
     - `objective.recovery_policy.required=true` means the BT must include an explicit recovery branch, not just a retry decorator.
     - When eventual success is required, wrap the check+recovery branch with `RetryUntilSuccessful` (or equivalent loop control) so the tree retries after recovery instead of terminating on first failure.
     - Use `RetryUntilSuccessful` only when `objective.recovery_policy.required=true` or `objective.recovery_policy.loop_until_success=true`.
@@ -111,6 +128,19 @@ Reason internally in a step-by-step manner, but never reveal that reasoning in t
     - If objective.recovery_policy.retry_attempts is provided with a positive integer, you MUST set `RetryUntilSuccessful num_attempts` to exactly that value.
     - If objective.recovery_policy.retry_attempts is `forever`, use unbounded retry (`RetryUntilSuccessful num_attempts="-1"`).
     - Do NOT infer `required=true` only from the presence of retry_attempts. Plain action retries may use RetryUntilSuccessful without a separate recovery branch.
+    - If `objective.recovery_policy.timeout` is present, you MUST enforce this deadline by wrapping the relevant subtree inside a `<Timeout msec="...">` decorator (converting the timeout value to milliseconds).
+    - **SCOPE OF DECORATORS & CONTROL FLOW DEADLINES**: When a deadline, time limit, or retry policy (e.g., Timeout, Retry) applies to a multi-step process (such as searching/waiting for a condition to be met, and then performing a downstream action once satisfied):
+      1. Wrap the *entire* multi-step sequence (the search/wait subtree followed by the downstream actions) inside the decorator (e.g., `<Timeout>` or `<RetryUntilSuccessful>`). This ensures the constraint governs the full duration of both finding/waiting and acting.
+      2. To execute subsequent actions only after the condition is met, use a `<Sequence>`. The first child of this sequence must be a subtree that handles the conditional search/wait loop:
+         - Construct this subtree using a `<ReactiveFallback>`.
+         - The first child of the `<ReactiveFallback>` must be the condition/check node (which returns FAILURE while the target state is not met, and SUCCESS when it is).
+         - The second child of the `<ReactiveFallback>` must be the search/wait action (which returns RUNNING).
+         - This ensures that while the condition is not met, the action runs (returning RUNNING); as soon as the condition succeeds, the `<ReactiveFallback>` returns SUCCESS immediately, terminating the loop and allowing the parent sequence to proceed.
+         - The subsequent children of the parent `<Sequence>` must be the actions to perform after the loop succeeds.
+      3. If a specific recovery action or a forced failure must execute when the decorator fails (e.g., when a timeout is reached and the decorator returns FAILURE), place the decorated subtree as the first child of a `<Fallback>`, and place the recovery/failure actions as the subsequent child of that `<Fallback>`.
+    - Timeout and retries are complementary: retries can continue only while the timeout window has not expired.
+    - On timeout expiration, follow objective intent: if `objective.allow_forced_plan_fail=true`, you may terminate via a forced-fail utility action; otherwise return FAILURE through normal BT control flow without forced plan termination.
+    - Do NOT invent timeout port names or units; use the timeout node exactly as defined in STANDARD BT.CPP v4 NODES.
     - When a condition node exposes diagnostic outputs (for example, a list of failing elements), wire those outputs to blackboard variables and use them in the failure branch when relevant.
   9. **DATA CONSISTENCY**:
     - Keep distinct pieces of information in distinct blackboard variables unless the objective explicitly asks to merge them.
@@ -140,6 +170,11 @@ Reason internally in a step-by-step manner, but never reveal that reasoning in t
         6) Structural arity check: no empty control nodes and no decorators with zero or multiple children.
         7) Every control node has a meaningful non-empty `name` attribute in snake_case.
       - If any check fails, regenerate the XML from scratch. Do not patch by inventing helper nodes.
+  12. **NO EXTRA BEHAVIORS / SIMPLICITY (CRITICAL)**:
+    - Keep the Behavior Tree as simple and direct as possible. Only implement the exact steps and recovery actions described in the `steps:` list of the objective.
+    - DO NOT add extra checks, actions, or capabilities that are not explicitly requested in the current step's objective, even if those capability nodes are listed in ROBOT CUSTOM CAPABILITIES.
+    - STRICTLY align the custom capabilities you use with the `skills_used` list. If a custom capability is NOT related to any skill in `skills_used`, you MUST NOT use it, with the only exceptions being non-interactive generic utility actions (e.g., to notify, log, speak a message, or fail the plan/step).
+    - Nodes that take user input or write a response/confirmation to a blackboard variable are interactive and are NOT generic utility actions; they MUST NOT be used unless explicitly required by the `skills_used` list. For notifications, warnings, or apologies, you must use only non-interactive utility nodes (e.g., nodes that output speech or log text without waiting for or capturing a response).
 
 # REFERENCE EXAMPLE (DESIRED STYLE)
 

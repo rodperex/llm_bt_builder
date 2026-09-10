@@ -17,10 +17,15 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from llm_bt_builder.srv import GenerateBT, FixBT
+import csv
+import pathlib
+import uuid
 import yaml
 import re
 import os
 import time
+import json
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 try:
     from llm_bt_builder.bt_validation import BTValidation
@@ -53,12 +58,20 @@ class RagBTAgent(BTValidation, Node):
         self.declare_parameter('api_key', '')
         self.declare_parameter('prompt_file', 'system_prompt.txt')
         self.declare_parameter('embeddings_device', 'cpu')
+        self.declare_parameter('rag_top_k', 5)
+        self.declare_parameter('rag', True)
+        self.declare_parameter('metrics', False)
 
         self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.model_id = self.get_parameter('model_id').value
         self.api_url = self.get_parameter('api_url').value
         self.api_key = self.get_parameter('api_key').value
         self.embeddings_device = str(self.get_parameter('embeddings_device').value).strip().lower()
+        self.rag_top_k = int(self.get_parameter('rag_top_k').value)
+        self.rag_top_k = max(1, min(self.rag_top_k, 50))
+        self.rag_enabled = bool(self.get_parameter('rag').value)
+        self.metrics_enabled = bool(self.get_parameter('metrics').value)
+        self._generation_metrics = None
 
         # API key detection based on provider
         param_key = self.get_parameter('api_key').value
@@ -276,6 +289,170 @@ class RagBTAgent(BTValidation, Node):
                 )
             raise
 
+    def _workspace_root(self):
+        return pathlib.Path(__file__).resolve().parents[3]
+
+    def _exec_root(self):
+        exec_dir = self._workspace_root() / 'exec/btgen_metrics'
+        exec_dir.mkdir(parents=True, exist_ok=True)
+        return exec_dir
+
+    def _begin_generation_metrics(self, request, is_fix: bool, pipeline: str = 'rag'):
+        if not self.metrics_enabled or self._generation_metrics is not None:
+            return
+
+        self._generation_metrics = {
+            'started_at_utc': datetime.now(timezone.utc).isoformat(),
+            'started_perf_sec': time.perf_counter(),
+            'node_name': self.get_name(),
+            'node_class': self.__class__.__name__,
+            'pipeline': pipeline,
+            'llm_provider': self.llm_provider,
+            'model_id': self.model_id,
+            'execution_mode': getattr(self, 'mode', ''),
+            'metrics_enabled': True,
+            'is_fix_request': bool(is_fix),
+            'objective_chars': len(str(getattr(request, 'objective', '') or '')),
+            'bt_nodes_yaml_chars': len(str(getattr(request, 'bt_nodes_yaml', '') or '')),
+            'llm_calls_total': 0,
+            'llm_calls_to_success': 0,
+            'rag_enabled': bool(self.rag_enabled),
+            'total_catalog_nodes': 0,
+            'feedback_counts': {
+                'syntax': 0,
+                'structure': 0,
+                'semantic': 0,
+                'llm_error': 0,
+                'other': 0,
+            },
+            'validation_failures': {
+                'syntax': 0,
+                'structure': 0,
+                'semantic': 0,
+            },
+            'repeat_counts': {
+                'structure_max': 0,
+                'semantic_max': 0,
+            },
+            'feedback_trace': [],
+            'rag_selected_nodes': 0,
+            'bt_cleanup_collapsed_count': 0,
+            'bt_cleanup_collapsed_tags': [],
+            'success': False,
+        }
+
+    def _metric_note_llm_call(self):
+        if self._generation_metrics is None:
+            return
+        self._generation_metrics['llm_calls_total'] += 1
+
+    def _metric_note_feedback(self, feedback_type: str, message: str = ''):
+        if self._generation_metrics is None:
+            return
+
+        feedback_type = feedback_type if feedback_type in self._generation_metrics['feedback_counts'] else 'other'
+        self._generation_metrics['feedback_counts'][feedback_type] += 1
+        self._generation_metrics['feedback_trace'].append(
+            {
+                'index': len(self._generation_metrics['feedback_trace']) + 1,
+                'type': feedback_type,
+                'message': self._truncate_for_log(message, 200),
+            }
+        )
+
+    def _metric_note_validation_failure(self, validation_type: str):
+        if self._generation_metrics is None:
+            return
+        if validation_type in self._generation_metrics['validation_failures']:
+            self._generation_metrics['validation_failures'][validation_type] += 1
+
+    def _metric_note_repeat_count(self, validation_type: str, count: int):
+        if self._generation_metrics is None:
+            return
+        key = f'{validation_type}_max'
+        if key in self._generation_metrics['repeat_counts']:
+            self._generation_metrics['repeat_counts'][key] = max(self._generation_metrics['repeat_counts'][key], count)
+
+    def _metric_note_rag_selected(self, count: int):
+        if self._generation_metrics is None:
+            return
+        self._generation_metrics['rag_selected_nodes'] = count
+
+    def _metric_note_total_catalog_nodes(self, count: int):
+        if self._generation_metrics is None:
+            return
+        self._generation_metrics['total_catalog_nodes'] = count
+
+    def _metric_merge(self, values: dict):
+        if self._generation_metrics is None or not isinstance(values, dict):
+            return
+        self._generation_metrics.update(values)
+
+    def _postprocess_generated_bt_xml(self, bt_xml: str, is_fix: bool):
+        # Hook for subclasses to normalize/clean generated XML before metrics are finalized.
+        return bt_xml, {}
+
+    def _finalize_generation_metrics(self, response):
+        if self._generation_metrics is None or not self.metrics_enabled:
+            self._generation_metrics = None
+            return
+
+        metrics = dict(self._generation_metrics)
+        metrics['finished_at_utc'] = datetime.now(timezone.utc).isoformat()
+        metrics['duration_ms'] = round((time.perf_counter() - metrics['started_perf_sec']) * 1000.0, 3)
+        metrics['success'] = bool(getattr(response, 'success', False))
+        metrics['response_message'] = str(getattr(response, 'message', '') or '')
+        metrics['bt_xml_chars'] = len(str(getattr(response, 'bt_xml', '') or ''))
+        metrics['llm_calls_to_success'] = metrics['llm_calls_total'] if metrics['success'] else 0
+
+        metrics.pop('started_perf_sec', None)
+
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        safe_model = str(self.model_id).replace('/', '_').replace(':', '_')
+        safe_node = str(self.get_name()).replace('/', '_')
+        json_path = self._exec_root() / f"btgen_metrics_{timestamp}_{safe_node}_{safe_model}_{uuid.uuid4().hex[:8]}.json"
+        csv_path = self._exec_root() / 'bt_generation_metrics_summary.csv'
+
+        with json_path.open('w', encoding='utf-8') as handle:
+            json.dump(metrics, handle, indent=2, ensure_ascii=False)
+
+        csv_row = {
+            'timestamp_utc': metrics['started_at_utc'],
+            'node_name': metrics['node_name'],
+            'node_class': metrics['node_class'],
+            'pipeline': metrics['pipeline'],
+            'llm_provider': metrics['llm_provider'],
+            'model_id': metrics['model_id'],
+            'execution_mode': metrics['execution_mode'],
+            'metrics_enabled': metrics['metrics_enabled'],
+            'is_fix_request': metrics['is_fix_request'],
+            'rag_enabled': metrics['rag_enabled'],
+            'success': metrics['success'],
+            'duration_ms': metrics['duration_ms'],
+            'llm_calls_total': metrics['llm_calls_total'],
+            'llm_calls_to_success': metrics['llm_calls_to_success'],
+            'objective_chars': metrics['objective_chars'],
+            'bt_nodes_yaml_chars': metrics['bt_nodes_yaml_chars'],
+            'bt_xml_chars': metrics['bt_xml_chars'],
+            'rag_selected_nodes': metrics['rag_selected_nodes'],
+            'total_catalog_nodes': metrics['total_catalog_nodes'],
+            'feedback_counts_json': json.dumps(metrics['feedback_counts'], ensure_ascii=False),
+            'validation_failures_json': json.dumps(metrics['validation_failures'], ensure_ascii=False),
+            'repeat_counts_json': json.dumps(metrics['repeat_counts'], ensure_ascii=False),
+            'feedback_trace_json': json.dumps(metrics['feedback_trace'], ensure_ascii=False),
+            'response_message': metrics['response_message'],
+            'metrics_json_path': str(json_path),
+        }
+        write_header = not csv_path.exists()
+        with csv_path.open('a', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(csv_row.keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(csv_row)
+
+        self.get_logger().info(f"📊 BT metrics stored in: {json_path}")
+        self._generation_metrics = None
+
     def _load_bt_nodes_yaml(self, filename):
         """Load BT.CPP standard nodes from YAML file"""
         try:
@@ -412,7 +589,10 @@ class RagBTAgent(BTValidation, Node):
 
         add_query(objective.get('description', ''))
 
-        for skill in objective.get('skills_used', []):
+        skills = data.get('skills_used', [])
+        if not skills and isinstance(objective, dict):
+            skills = objective.get('skills_used', [])
+        for skill in skills:
             add_query(str(skill))
 
         for entry in objective.get('steps', []):
@@ -580,8 +760,10 @@ class RagBTAgent(BTValidation, Node):
         return self._run_agentic_pipeline(request, response, is_fix=True)
 
     def _run_agentic_pipeline(self, request, response, is_fix):
-        K = 10
+        K = self.rag_top_k
         MAX_RETRIES = 25
+
+        self._begin_generation_metrics(request, is_fix, pipeline='rag')
 
         if is_fix:
             self.get_logger().info(f"🔧 FIX BT Request received! Error to fix: '{request.error_message}'")
@@ -591,6 +773,8 @@ class RagBTAgent(BTValidation, Node):
 
         # 1. DATA PREPARATION
         full_node_specs = self.parse_full_specs(request.bt_nodes_yaml)
+        total_catalog_nodes = len(full_node_specs)
+        self._metric_note_total_catalog_nodes(total_catalog_nodes)
         known_bb_vars = self._extract_known_blackboard_vars(request.objective)
         known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
         required_output_vars = self._extract_required_output_vars(request.objective)
@@ -598,38 +782,70 @@ class RagBTAgent(BTValidation, Node):
         allow_forced_plan_fail = self._extract_allow_forced_plan_fail(request.objective)
 
         # 2. RAG (Only done once at the beginning)
-        vector_db = self.create_vector_store(request.bt_nodes_yaml)
-        if not vector_db:
-            response.success = False; response.message = "Error indexing YAML"; return response
+        vector_db = None
+        if self.rag_enabled:
+            vector_db = self.create_vector_store(request.bt_nodes_yaml)
+            if not vector_db:
+                response.success = False; response.message = "Error indexing YAML"
+                self._finalize_generation_metrics(response)
+                return response
 
-        rag_query = self._sanitize_rag_query(request.objective)
-        removed_mcp_context = len(rag_query) < len(request.objective)
-        rag_queries, results = self._retrieve_relevant_nodes(vector_db, request.objective, K)
-        rag_log = (
-            "\n========== RAG INPUT START =========="
-            f"\nK: {K}"
-            "\nRetrieval query source: aggregated objective queries"
-            f"\nMCP context removed: {removed_mcp_context}"
-            f"\nOriginal chars: {len(request.objective)} | Query chars: {len(rag_query)}"
-            f"\nPrimary retrieval query:\n{rag_query}"
-            f"\nFocused queries ({len(rag_queries)}):\n- {'\n- '.join(rag_queries)}"
-            "\n=========== RAG INPUT END ==========="
-        )
-        self.get_logger().info(rag_log)
+            rag_query = self._sanitize_rag_query(request.objective)
+            removed_mcp_context = len(rag_query) < len(request.objective)
+            rag_queries, results = self._retrieve_relevant_nodes(vector_db, request.objective, K)
 
-        filtered_yaml_str = "bt_nodes:\n"
-        found_names = []
-        for res in results:
-            raw_node = res.metadata['raw_yaml']
-            filtered_yaml_str += "\n".join(["  " + line for line in raw_node.split('\n')]) + "\n"
-            found_names.append(raw_node.splitlines()[0])
+            # Ensure generic utility nodes are included if they exist in the robot's specs
+            generic_names = ('speak', 'forceplanfail', 'saytext', 'abort')
+            for node_name in full_node_specs.keys():
+                if node_name.lower() in generic_names:
+                    is_present = False
+                    for res in results:
+                        try:
+                            res_name = yaml.safe_load(res.metadata.get('raw_yaml', '')).get('name')
+                            if res_name == node_name:
+                                is_present = True
+                                break
+                        except Exception:
+                            pass
+                    if not is_present:
+                        exact_matches = vector_db.similarity_search(f"Tool: {node_name}", 1)
+                        if exact_matches:
+                            results.append(exact_matches[0])
+
+            rag_log = (
+                "\n========== RAG INPUT START =========="
+                f"\nK: {K}"
+                "\nRetrieval query source: aggregated objective queries"
+                f"\nMCP context removed: {removed_mcp_context}"
+                f"\nOriginal chars: {len(request.objective)} | Query chars: {len(rag_query)}"
+                f"\nPrimary retrieval query:\n{rag_query}"
+                f"\nFocused queries ({len(rag_queries)}):\n- {'\n- '.join(rag_queries)}"
+                "\n=========== RAG INPUT END ==========="
+            )
+            self.get_logger().info(rag_log)
+
+            filtered_yaml_str = "bt_nodes:\n"
+            found_names = []
+            for res in results:
+                raw_node = res.metadata['raw_yaml']
+                filtered_yaml_str += "\n".join(["  " + line for line in raw_node.split('\n')]) + "\n"
+                found_names.append(raw_node.splitlines()[0])
+        else:
+            filtered_yaml_str = request.bt_nodes_yaml or "bt_nodes:\n"
+            found_names = list(full_node_specs.keys())
+            self.get_logger().info(
+                f"🔎 RAG disabled: using full catalog ({len(found_names)} nodes) without retrieval filtering")
+
+        self._metric_note_rag_selected(len(found_names))
 
         self.get_logger().info(f"🔎 RAG selected: {found_names}")
 
         # 3. PROMPT CONSTRUCTION
         raw_template = self.load_prompt_template()
         if not raw_template:
-            response.success = False; response.message = "Prompt file missing"; return response
+            response.success = False; response.message = "Prompt file missing"
+            self._finalize_generation_metrics(response)
+            return response
         else:
             self.get_logger().debug(f"📄 Prompt template loaded successfully: {raw_template}")
         # Prepare BT.CPP standard nodes
@@ -667,6 +883,7 @@ class RagBTAgent(BTValidation, Node):
             self.get_logger().info(f"Attempt {attempt + 1}/{MAX_RETRIES}...")
 
             try:
+                self._metric_note_llm_call()
                 ai_msg = self.llm.invoke(messages)
                 raw_response = ai_msg.content
 
@@ -691,6 +908,8 @@ class RagBTAgent(BTValidation, Node):
                 is_valid_xml, xml_msg = self.validate_xml_syntax(xml_str)
                 if not is_valid_xml:
                     self.get_logger().warn(f"⚠️ XML Syntax Error: {xml_msg}")
+                    self._metric_note_feedback('syntax', xml_msg)
+                    self._metric_note_validation_failure('syntax')
                     # Add to history so the LLM can self-correct
                     messages.append(AIMessage(content=ai_msg.content))
                     messages.append(HumanMessage(content=f"ERROR: Your XML syntax is invalid: {xml_msg}. Please fix tags and structure."))
@@ -701,12 +920,15 @@ class RagBTAgent(BTValidation, Node):
                 is_valid_structure, struct_msg, struct_hint = self.validate_xml_bt(xml_str)
                 if not is_valid_structure:
                     self.get_logger().warn(f"⚠️ BT Structure Error: {struct_msg}")
+                    self._metric_note_feedback('structure', struct_msg)
+                    self._metric_note_validation_failure('structure')
                     repair_hint = struct_hint
                     if struct_msg == last_structure_error:
                         repeated_structure_error_count += 1
                     else:
                         last_structure_error = struct_msg
                         repeated_structure_error_count = 1
+                    self._metric_note_repeat_count('structure', repeated_structure_error_count)
 
                     if repeated_structure_error_count >= 2:
                         repair_hint += (
@@ -724,7 +946,9 @@ class RagBTAgent(BTValidation, Node):
                             "Repeated BT structure error (x5): "
                             f"{struct_msg}"
                         )
-                        vector_db.delete_collection()
+                        if vector_db is not None:
+                            vector_db.delete_collection()
+                        self._finalize_generation_metrics(response)
                         return response
 
                     messages.append(AIMessage(content=ai_msg.content))
@@ -744,12 +968,15 @@ class RagBTAgent(BTValidation, Node):
                 )
                 if not is_valid_bt:
                     self.get_logger().warn(f"⚠️ BT Semantic Error: {bt_msg}")
+                    self._metric_note_feedback('semantic', bt_msg)
+                    self._metric_note_validation_failure('semantic')
                     repair_hint = bt_hint
                     if bt_msg == last_semantic_error:
                         repeated_semantic_error_count += 1
                     else:
                         last_semantic_error = bt_msg
                         repeated_semantic_error_count = 1
+                    self._metric_note_repeat_count('semantic', repeated_semantic_error_count)
 
                     if repeated_semantic_error_count >= 2:
                         repair_hint += (
@@ -764,18 +991,25 @@ class RagBTAgent(BTValidation, Node):
                     continue # Next attempt
 
                 # --- SUCCESS ---
-                response.bt_xml = xml_str
+                final_bt_xml, post_metrics = self._postprocess_generated_bt_xml(xml_str, is_fix)
+                if isinstance(post_metrics, dict) and post_metrics:
+                    self._metric_merge(post_metrics)
+
+                response.bt_xml = final_bt_xml
                 response.success = True
                 response.message = f"RAG-({self.model_id})"
                 self.get_logger().info("🎉 XML generated and VALIDATED successfully.")
 
                 # Clean memory before exiting
-                vector_db.delete_collection()
+                if vector_db is not None:
+                    vector_db.delete_collection()
+                self._finalize_generation_metrics(response)
                 return response
 
             except Exception as e:
                 error_str = str(e)
                 self.get_logger().error(f"🔥 Error invoking LLM: {e}")
+                self._metric_note_feedback('llm_error', error_str)
                 # Respect retry_delay from 429 responses (e.g. Gemini free tier)
                 import re as _re
                 delay_match = _re.search(r'retry[_\s]delay[^0-9]*(\d+)', error_str, _re.IGNORECASE)
@@ -786,7 +1020,9 @@ class RagBTAgent(BTValidation, Node):
         # If we reach here, all attempts failed
         response.success = False
         response.message = "Max retries reached. Validation failed."
-        vector_db.delete_collection()
+        if vector_db is not None:
+            vector_db.delete_collection()
+        self._finalize_generation_metrics(response)
         return response
 
     def extract_xml(self, text):

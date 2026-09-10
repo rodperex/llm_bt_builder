@@ -6,8 +6,6 @@ objective:
   
   skills_used:
     - "Speak using text-to-speech"
-    - "Extract specific information from a text using LLM"
-    - "Ask a yes/no confirmation question and capture the result"
     - "Check whether requested items are available against a provided availability list"
   
   inputs:
@@ -16,7 +14,12 @@ objective:
     - dessert
   
   outputs:
-    - order_confirmed
+    - unavailable_items
+
+  available_blackboard_vars:
+    - main_dish
+    - drink
+    - dessert
   
   recovery_policy:
     required: false
@@ -25,10 +28,7 @@ objective:
 
   steps:
       - step: "Check whether the order items are available against the availability list"
-      - step: "If all items are available, communicate it to the customer and say goodbye."
-      - step: "If any item is unavailable, apologize, and force a plan fail."
-  
-  constraints:
+      - step: "If all items are available, communicate it to the customer and say goodbye. If any item is unavailable, tell the customer the unavailable items, and force a plan fail."
   
   style:
     - polite
