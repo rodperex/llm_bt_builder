@@ -53,3 +53,11 @@ bt_nodes:
       SUCCESS: "Successful children >= success_count."
       FAILURE: "Failed children >= failure_count."
       RUNNING: "Thresholds not yet met."
+
+  - name: "IfThenElse"
+    type: "Control"
+    description: "First child is condition, second is 'then', third is 'else'."
+    ports: []
+    return:
+      SUCCESS: "The active branch (then or else) succeeded."
+      FAILURE: "The active branch (then or else) failed."

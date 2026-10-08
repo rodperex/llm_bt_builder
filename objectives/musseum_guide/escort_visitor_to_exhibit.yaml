@@ -1,0 +1,18 @@
+objective:
+  name: "escort_visitor_to_exhibit"
+  description: "A service robot acting as a guide in a museum. Overall goal: Find a lost visitor, ask them what exhibit they are looking for, escort them to that exhibit, and report back to the information desk. In this step: The robot must ask the visitor to follow, navigate to the requested exhibit, and confirm arrival while facing the visitor."
+  inputs:
+    - exhibit_choice
+  recovery_policy:
+    required: false
+    loop_until_success: false
+    retry_attempts: 3
+  steps:
+    - step: "Speak using text-to-speech: 'Please follow me to the {exhibit_choice} exhibit.'"
+    - step: "Navigate to a named location: {exhibit_choice}"
+    - step: "Turn towards the visitor before speaking"
+    - step: "Speak using text-to-speech: 'We have arrived at the {exhibit_choice} exhibit.'"
+  style:
+    - guiding
+    - calm
+

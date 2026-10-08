@@ -1,0 +1,18 @@
+objective:
+  name: "inquire_exhibit_choice"
+  description: "A service robot acting as a guide in a museum. Overall goal: Find a lost visitor, ask them what exhibit they are looking for, escort them to that exhibit, and report back to the information desk. In this step: The robot must ask which exhibit the visitor is looking for and extract a valid exhibit destination."
+  outputs:
+    - exhibit_choice
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+  steps:
+    - step: "Ask an open-ended question and capture the answer: 'Which exhibit are you looking for?'"
+    - step: "Extract specific information from the captured text using LLM to obtain exhibit_choice"
+    - step: "Check whether exhibit_choice is valid against the known exhibit list"
+    - step: "If invalid, ask again and repeat extraction"
+  style:
+    - clear
+    - helpful
+

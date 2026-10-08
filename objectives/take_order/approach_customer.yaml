@@ -1,0 +1,23 @@
+
+objective:
+  name: "approach_customer"
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must navigate to the detected customer's location."
+  inputs:
+    - detected_customer
+  recovery_policy:
+    required: false
+    loop_until_success: false
+    retry_attempts: 3
+  steps:
+    - step: "Navigate to a dynamic destination provided via blackboard (e.g. {detected_person})"
+  constraints:
+    max_navigation_time: 30
+  style:
+    - polite
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available locations are:
+    - main_kitchen
+    - bar
+  

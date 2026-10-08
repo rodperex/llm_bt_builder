@@ -1,0 +1,15 @@
+objective:
+  name: "search_lost_visitor"
+  description: "A service robot acting as a guide in a museum. Overall goal: Find a lost visitor, ask them what exhibit they are looking for, escort them to that exhibit, and report back to the information desk. In this step: The robot must actively search for a lost visitor in the entrance hall until one person is detected."
+  outputs:
+    - detected_person
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+  steps:
+    - step: "Set the perception system to search for a specific target class: person"
+    - step: "Detect and identify a target entity (person, object)"
+    - step: "If no person is detected, spin in place and repeat the detection cycle"
+  style:
+    - attentive

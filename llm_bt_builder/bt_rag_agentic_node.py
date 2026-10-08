@@ -43,6 +43,10 @@ import re
 import os
 import time
 import xml.etree.ElementTree as ET
+try:
+    from llm_bt_builder.bt_validation import BTValidation
+except ModuleNotFoundError:
+    from bt_validation import BTValidation
 
 try:
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -68,7 +72,7 @@ class XMLArg(BaseModel):
 
 # ── ROS 2 Node ────────────────────────────────────────────────────────────────
 
-class AgenticBTNode(Node):
+class AgenticBTNode(BTValidation, Node):
 
     def __init__(self):
         super().__init__('llm_bt_agentic')
@@ -80,10 +84,12 @@ class AgenticBTNode(Node):
         self.declare_parameter('api_url', '')
         self.declare_parameter('api_key', '')
         self.declare_parameter('prompt_file', 'system_prompt.txt')
+        self.declare_parameter('rag', True)
 
         self.llm_provider = self.get_parameter('llm_provider').value.lower()
         self.model_id     = self.get_parameter('model_id').value
         self.api_url      = self.get_parameter('api_url').value
+        self.rag_enabled  = bool(self.get_parameter('rag').value)
 
         # Smart API-key detection (env vars as fallback)
         param_key = self.get_parameter('api_key').value
@@ -96,6 +102,7 @@ class AgenticBTNode(Node):
                 'anthropic': ['ANTHROPIC_API_KEY'],
                 'deepseek':  ['DEEPSEEK_API_KEY'],
                 'ollama':    ['LLM_API_KEY'],
+                'cerebras':  ['CEREBRAS_API_KEY'],
             }
             for ev in provider_to_env.get(self.llm_provider, ['LLM_API_KEY']):
                 self.api_key = os.getenv(ev, '')
@@ -177,6 +184,20 @@ class AgenticBTNode(Node):
                     temperature=0.1,
                     timeout=TIMEOUT,
                 )
+            elif self.llm_provider == 'cerebras':
+                self.get_logger().info(f"🧠 Configuring Cerebras Cloud ({self.model_id})...")
+                base = self.api_url.rstrip('/') if self.api_url else 'https://api.cerebras.ai/v1'
+                if base and not base.endswith('/v1'):
+                    base = base + '/v1'
+                return ChatOpenAI(
+                    model=self.model_id,
+                    api_key=self.api_key,
+                    base_url=base,
+                    temperature=0.1,
+                    max_tokens=4096,
+                    timeout=TIMEOUT,
+                    max_retries=2,
+                )
             else:
                 self.get_logger().error(f"❌ Unknown provider: {self.llm_provider}")
                 return None
@@ -194,11 +215,14 @@ class AgenticBTNode(Node):
     # the per-request node_specs so they are safe across concurrent requests.
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _make_tools(self, full_node_specs):
-        decorators      = self.decorators
-        control_nodes   = self.control_nodes
-        structural_nodes = self.structural_nodes
-        structural_required_ports = self.structural_required_ports
+    def _make_tools(
+        self,
+        full_node_specs,
+        known_bb_vars,
+        known_bb_var_types,
+        required_output_vars,
+        recovery_policy,
+    ):
 
         # Mutable state shared between submit_bt_xml closure and the caller
         submit_state = {"xml": None, "done": False}
@@ -221,37 +245,10 @@ class AgenticBTNode(Node):
             - Control nodes must have at least 1 child.
             - AlwaysSuccess / AlwaysFailure must have 0 children.
             Call this after validate_xml_syntax returns VALID."""
-            try:
-                root = ET.fromstring(xml)
-            except ET.ParseError as e:
-                return f"ERROR: Cannot parse XML — {e}. Run validate_xml_syntax first."
-
-            for elem in root.iter():
-                if not isinstance(elem.tag, str):
-                    continue
-                n = len(list(elem))
-                if elem.tag in ('root', 'BehaviorTree'):
-                    if n != 1:
-                        return (f"ERROR: <{elem.tag}> must have exactly 1 child, "
-                                f"found {n}.")
-                elif elem.tag in decorators:
-                    if n != 1:
-                        return (f"ERROR: Decorator <{elem.tag}> must have exactly 1 child, "
-                                f"found {n}.")
-                elif elem.tag in control_nodes:
-                    if n < 1:
-                        return (f"ERROR: Control node <{elem.tag}> must have at least 1 child, "
-                                f"found {n}.")
-                elif elem.tag in ('AlwaysSuccess', 'AlwaysFailure'):
-                    if n > 0:
-                        return f"ERROR: <{elem.tag}> must have 0 children, found {n}."
-                required = structural_required_ports.get(elem.tag, [])
-                for req_port in required:
-                    if req_port not in elem.attrib:
-                        return (f"ERROR: <{elem.tag}> is missing required attribute '{req_port}'. "
-                                f"Add it, e.g. {req_port}=\"3\".")
-
-            return "VALID: BehaviorTree structure is correct."
+            ok, msg, hint = self.validate_xml_bt(xml)
+            if ok:
+                return "VALID: BehaviorTree structure is correct."
+            return f"ERROR: {msg}. {hint}"
 
         # ── Tool 3: BT semantics ───────────────────────────────────────────
         def validate_bt_semantics(xml: str) -> str:
@@ -259,25 +256,19 @@ class AgenticBTNode(Node):
             capabilities YAML and only uses declared ports.
             Call this after validate_bt_structure returns VALID."""
             try:
-                root = ET.fromstring(xml)
-            except ET.ParseError as e:
-                return f"ERROR: Cannot parse XML — {e}. Run validate_xml_syntax first."
-
-            for elem in root.iter():
-                if not isinstance(elem.tag, str) or elem.tag in structural_nodes:
-                    continue
-                if elem.tag not in full_node_specs:
-                    return (f"ERROR: Node <{elem.tag}> is NOT in the capabilities list. "
-                            f"Use only allowed nodes.")
-                allowed = full_node_specs[elem.tag]
-                for attr in elem.attrib:
-                    if attr in ('name', 'ID'):
-                        continue
-                    if attr not in allowed:
-                        return (f"ERROR: Node <{elem.tag}> uses undeclared port '{attr}'. "
-                                f"Allowed ports: {allowed}.")
-
-            return "VALID: All nodes and ports are semantically correct."
+                ok, msg, hint = self.validate_bt_semantics(
+                    xml,
+                    full_node_specs,
+                    known_bb_vars,
+                    known_bb_var_types,
+                    required_output_vars,
+                    recovery_policy,
+                )
+                if ok:
+                    return "VALID: BT semantics are correct."
+                return f"ERROR: {msg}. {hint}"
+            except Exception as e:
+                return f"ERROR: Semantic validation failed — {e}"
 
         # ── Tool 4: submit ─────────────────────────────────────────────────
         def submit_bt_xml(xml: str) -> str:
@@ -346,17 +337,7 @@ class AgenticBTNode(Node):
             return None
 
     def _parse_full_specs(self, yaml_content):
-        specs = {}
-        try:
-            data = yaml.safe_load(yaml_content)
-            for node in data.get('bt_nodes', []):
-                raw_ports = node.get('ports', []) or []
-                ports = [p.get('key') or p.get('name')
-                         for p in raw_ports if p.get('key') or p.get('name')]
-                specs[node['name']] = ports
-        except Exception:
-            pass
-        return specs
+        return self._parse_capability_specs(yaml_content)
 
     def _load_prompt_template(self):
         try:
@@ -393,20 +374,68 @@ class AgenticBTNode(Node):
             return []
 
     def _parse_structural_required_ports(self, *yaml_contents):
-        """Extract required port names for each structural (control/decorator) node."""
-        required = {}
-        for content in yaml_contents:
-            try:
-                data = yaml.safe_load(content)
-                for node in data.get('bt_nodes', []):
-                    ports = node.get('ports', []) or []
-                    req = [p.get('name') or p.get('key')
-                           for p in ports if p.get('name') or p.get('key')]
-                    if req:
-                        required[node['name']] = req
-            except Exception:
-                pass
-        return required
+        return super()._parse_structural_required_ports(*yaml_contents)
+
+    def _extract_recovery_policy(self, objective_text):
+        """Read optional objective.recovery_policy without keyword heuristics."""
+        policy = {
+            'required': False,
+            'loop_required': False,
+            'retry_attempts': None,
+        }
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return policy
+
+        if not isinstance(data, dict):
+            return policy
+
+        recovery_blocks = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'recovery_policy' and isinstance(v, dict):
+                        recovery_blocks.append(v)
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+
+        for block in recovery_blocks:
+            if bool(block.get('required', False)):
+                policy['required'] = True
+            if bool(block.get('loop_until_success', False)):
+                policy['loop_required'] = True
+
+            raw_retry = block.get('retry_attempts', None)
+            if raw_retry is None or isinstance(raw_retry, bool):
+                continue
+
+            parsed_retry = None
+            if isinstance(raw_retry, (int, float)):
+                parsed_retry = int(raw_retry)
+            elif isinstance(raw_retry, str):
+                value = raw_retry.strip().lower()
+                if value in ('', 'null', 'none'):
+                    parsed_retry = None
+                elif value == 'forever':
+                    parsed_retry = 'forever'
+                else:
+                    try:
+                        parsed_retry = int(value)
+                    except ValueError:
+                        parsed_retry = None
+
+            if parsed_retry == 'forever':
+                policy['retry_attempts'] = 'forever'
+            elif parsed_retry is not None and parsed_retry > 0:
+                policy['retry_attempts'] = parsed_retry
+
+        return policy
 
     def _extract_xml(self, text):
         match = re.search(r'```xml(.*?)```', text, re.DOTALL)
@@ -421,41 +450,32 @@ class AgenticBTNode(Node):
     # FINAL SAFETY CHECK (programmatic, runs after submit_bt_xml)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _final_validate(self, xml_str, node_specs):
+    def _final_validate(
+        self,
+        xml_str,
+        node_specs,
+        known_bb_vars,
+        known_bb_var_types,
+        required_output_vars,
+        recovery_policy,
+    ):
         # Phase 1 — Syntax
         try:
-            root = ET.fromstring(xml_str)
+            ET.fromstring(xml_str)
         except ET.ParseError as e:
             return False, f"Syntax error: {e}"
-
-        # Phase 2 — Structure
-        for elem in root.iter():
-            if not isinstance(elem.tag, str):
-                continue
-            n = len(list(elem))
-            if elem.tag in ('root', 'BehaviorTree') and n != 1:
-                return False, f"<{elem.tag}> must have 1 child, found {n}"
-            elif elem.tag in self.decorators and n != 1:
-                return False, f"Decorator <{elem.tag}> must have 1 child, found {n}"
-            elif elem.tag in self.control_nodes and n < 1:
-                return False, f"Control node <{elem.tag}> must have ≥1 child"
-            for req_port in self.structural_required_ports.get(elem.tag, []):
-                if req_port not in elem.attrib:
-                    return False, (f"<{elem.tag}> missing required attribute '{req_port}'")
-
-        # Phase 3 — Semantics
-        for elem in root.iter():
-            if not isinstance(elem.tag, str) or elem.tag in self.structural_nodes:
-                continue
-            if elem.tag not in node_specs:
-                return False, f"Node <{elem.tag}> not in capabilities YAML"
-            for attr in elem.attrib:
-                if attr in ('name', 'ID'):
-                    continue
-                if attr not in node_specs[elem.tag]:
-                    return False, f"Node <{elem.tag}> has undeclared port '{attr}'"
-
-        return True, "OK"
+        ok, err, _ = self.validate_xml_bt(xml_str)
+        if not ok:
+            return False, err
+        ok, msg, _ = self.validate_bt_semantics(
+            xml_str,
+            node_specs,
+            known_bb_vars,
+            known_bb_var_types,
+            required_output_vars,
+            recovery_policy,
+        )
+        return ok, msg
 
     # ─────────────────────────────────────────────────────────────────────────
     # SERVICE CALLBACK — agentic loop
@@ -479,29 +499,41 @@ class AgenticBTNode(Node):
 
         # 1. Parse full node specs for final validation
         full_node_specs = self._parse_full_specs(request.bt_nodes_yaml)
+        known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
+        required_output_vars = self._extract_required_output_vars(request.objective)
+        recovery_policy = self._extract_recovery_policy(request.objective)
 
         # 2. RAG — retrieve top-K semantically relevant nodes
-        vector_db = self._create_vector_store(request.bt_nodes_yaml)
-        if not vector_db:
-            response.success = False
-            response.message = "Error indexing YAML"
-            return response
+        if self.rag_enabled:
+            vector_db = self._create_vector_store(request.bt_nodes_yaml)
+            if not vector_db:
+                response.success = False
+                response.message = "Error indexing YAML"
+                return response
 
-        results       = vector_db.similarity_search(request.objective, K)
-        filtered_yaml = "bt_nodes:\n"
-        found_names   = []
-        for res in results:
-            raw = res.metadata['raw_yaml']
-            filtered_yaml += "\n".join("  " + line for line in raw.split('\n')) + "\n"
-            found_names.append(raw.splitlines()[0])
-        self.get_logger().info(f"🔎 RAG selected: {found_names}")
+            results       = vector_db.similarity_search(request.objective, K)
+            filtered_yaml = "bt_nodes:\n"
+            found_names   = []
+            for res in results:
+                raw = res.metadata['raw_yaml']
+                filtered_yaml += "\n".join("  " + line for line in raw.split('\n')) + "\n"
+                found_names.append(raw.splitlines()[0])
+            self.get_logger().info(f"🔎 RAG selected: {found_names}")
+        else:
+            vector_db = None
+            filtered_yaml = request.bt_nodes_yaml or "bt_nodes:\n"
+            found_names = list(full_node_specs.keys())
+            self.get_logger().info(
+                f"🔎 RAG disabled: using full catalog ({len(found_names)} nodes) without retrieval filtering")
 
         # 3. Build system prompt
         raw_template = self._load_prompt_template()
         if not raw_template:
             response.success = False
             response.message = "Prompt file missing"
-            vector_db.delete_collection()
+            if vector_db is not None:
+                vector_db.delete_collection()
             return response
 
         bt_std = ("## Control Nodes\n" + self.bt_control_nodes_yaml +
@@ -529,7 +561,13 @@ class AgenticBTNode(Node):
         )
 
         # 4. Build tools for this request and bind to LLM
-        tools, submit_state = self._make_tools(full_node_specs)
+        tools, submit_state = self._make_tools(
+            full_node_specs,
+            known_bb_vars,
+            known_bb_var_types,
+            required_output_vars,
+            recovery_policy,
+        )
         llm_with_tools      = self.llm.bind_tools(tools)
         tool_map            = {t.name: t for t in tools}
 
@@ -599,7 +637,14 @@ class AgenticBTNode(Node):
                         if root_idx != -1:
                             end_idx = xml_str.find(">", root_idx) + 1
                             xml_str = xml_str[:end_idx] + comment + xml_str[end_idx:]
-                        ok, err  = self._final_validate(xml_str, full_node_specs)
+                        ok, err  = self._final_validate(
+                            xml_str,
+                            full_node_specs,
+                            known_bb_vars,
+                            known_bb_var_types,
+                            required_output_vars,
+                            recovery_policy,
+                        )
 
                         if ok:
                             self.get_logger().info("🎉 XML validated and accepted by safety check.")

@@ -24,16 +24,25 @@ def generate_launch_description():
     provider_arg = DeclareLaunchArgument(
         'provider',
         default_value='openai',
-        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova'
-        description='LLM Provider: gemini, openai, anthropic, deepseek, or ollama'
+        # Options: 'gemini', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova', 'cerebras'
+        description='LLM Provider: gemini, openai, anthropic, deepseek, ollama, cerebras'
     )
 
     model_arg = DeclareLaunchArgument(
         'model',
+        # default_value='gemini-3.5-flash',
+        # default_value='command-r:35b',
+        # default_value='qwen2.5:7b',
+        # default_value='Meta-Llama-3.3-70B-Instruct',
+        # default_value='llama-3.3-70b-versatile',
+        # default_value='llama3.1-8b',
         # default_value='Meta-Llama-3.3-70B-Instruct',
         # default_value='gemini-2.5-flash-lite',
         # default_value='llama-3.1-8b-instant',
         default_value='gpt-4o',
+        # default_value='gemini-3.1-flash-lite-preview',
+        # default_value='gemini-2.5-pro',
+        # default_value='gpt-4.1',
         # default_value='gemini-2.0-flash-lite',
         # default_value='qwen2.5-coder:3b', # ollama (lighter model for testing)
         # default_value='qwen2.5-coder:7b', # ollama (powerful GPU required)
@@ -79,14 +88,80 @@ def generate_launch_description():
 
     agent_type_arg = DeclareLaunchArgument(
         'agent_type',
-        default_value='rag',
-        description='Agent type: "rag" for RAG agent, "normal" for standard agent, "agentic" for tool-calling agent'
+        default_value='mcp_rag',
+        description='Agent type: "rag", "mcp_rag", "normal", or "agentic"'
+    )
+
+    mcp_enabled_arg = DeclareLaunchArgument(
+        'mcp_enabled',
+        default_value='true',
+        description='Enable MCP context enrichment (used by mcp_rag).'
+    )
+
+    mcp_cmd_arg = DeclareLaunchArgument(
+        'mcp_cmd',
+        default_value='ros2 run mcp_context_server mcp_context_server',
+        description='Command used to start the MCP server.'
+    )
+
+    mcp_timeout_arg = DeclareLaunchArgument(
+        'mcp_timeout_sec',
+        default_value='2.0',
+        description='Timeout for MCP calls in seconds.'
+    )
+
+    mcp_fail_open_arg = DeclareLaunchArgument(
+        'mcp_fail_open',
+        default_value='true',
+        description='If true, continue without MCP on failure.'
+    )
+
+    use_general_context_arg = DeclareLaunchArgument(
+        'use_general_context',
+        default_value='false',
+        description='If true, inject general MCP context (capabilities and mission snapshot) into the prompt.'
+    )
+
+    use_episodic_mem_arg = DeclareLaunchArgument(
+        'use_episodic_mem',
+        default_value='false',
+        description='Enable episodic memory RAG retrieval for MCP BT agent.'
+    )
+
+    episodic_mem_pool_size_arg = DeclareLaunchArgument(
+        'episodic_mem_pool_size',
+        default_value='100',
+        description='Max episodic memories fetched before retrieval.'
+    )
+
+    episodic_mem_top_k_arg = DeclareLaunchArgument(
+        'episodic_mem_top_k',
+        default_value='5',
+        description='Top-k episodic memories injected into prompt context.'
     )
 
     prompt_file_arg = DeclareLaunchArgument(
         'prompt_file',
-        default_value='system_prompt.txt',
+        default_value='mcp_system_prompt.txt',
         description='Prompt file name in prompts/ directory (e.g., system_prompt.txt)'
+    )
+
+    embeddings_device_arg = DeclareLaunchArgument(
+        'embeddings_device',
+        default_value='cpu',
+        description='Device for HuggingFace embeddings: cpu, cuda, or auto.'
+    )
+
+    rag_arg = DeclareLaunchArgument(
+        'rag',
+        default_value='true',
+        description='Enable RAG node retrieval. If false, use the full robot node catalog without retrieval filtering.'
+    )
+
+    metrics_arg = DeclareLaunchArgument(
+        'metrics',
+        default_value='true',
+        description='Enable generation metrics for RAG-based BT agents.'
     )
 
     # RAG node
@@ -102,10 +177,44 @@ def generate_launch_description():
             'execution_mode': LaunchConfiguration('mode'),
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
-            'prompt_file': LaunchConfiguration('prompt_file')
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'embeddings_device': LaunchConfiguration('embeddings_device'),
+            'rag': LaunchConfiguration('rag'),
+            'metrics': LaunchConfiguration('metrics')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'rag'"])
+        )
+    )
+
+    # MCP-enhanced RAG node (A/B against bt_rag_agent_node)
+    mcp_rag_node = Node(
+        package='llm_bt_builder',
+        executable='mcp_bt_rag_agent_node.py',
+        name='mcp_llm_rag_bt_agent',
+        output='screen',
+        emulate_tty=True,
+        parameters=[{
+            'llm_provider': LaunchConfiguration('provider'),
+            'model_id': LaunchConfiguration('model'),
+            'execution_mode': LaunchConfiguration('mode'),
+            'api_url': LaunchConfiguration('url'),
+            'api_key': LaunchConfiguration('key'),
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'embeddings_device': LaunchConfiguration('embeddings_device'),
+            'rag': LaunchConfiguration('rag'),
+            'metrics': LaunchConfiguration('metrics'),
+            'mcp_enabled': LaunchConfiguration('mcp_enabled'),
+            'mcp_cmd': LaunchConfiguration('mcp_cmd'),
+            'mcp_timeout_sec': LaunchConfiguration('mcp_timeout_sec'),
+            'mcp_fail_open': LaunchConfiguration('mcp_fail_open'),
+            'use_general_context': LaunchConfiguration('use_general_context'),
+            'use_episodic_mem': LaunchConfiguration('use_episodic_mem'),
+            'episodic_mem_pool_size': LaunchConfiguration('episodic_mem_pool_size'),
+            'episodic_mem_top_k': LaunchConfiguration('episodic_mem_top_k'),
+        }],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'mcp_rag'"])
         )
     )
 
@@ -141,7 +250,8 @@ def generate_launch_description():
             'model_id': LaunchConfiguration('model'),
             'api_url': LaunchConfiguration('url'),
             'api_key': LaunchConfiguration('key'),
-            'prompt_file': LaunchConfiguration('prompt_file')
+            'prompt_file': LaunchConfiguration('prompt_file'),
+            'rag': LaunchConfiguration('rag')
         }],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('agent_type'), "' == 'agentic'"])
@@ -156,7 +266,19 @@ def generate_launch_description():
         key_arg,
         agent_type_arg,
         prompt_file_arg,
+        embeddings_device_arg,
+        rag_arg,
+        metrics_arg,
+        mcp_enabled_arg,
+        mcp_cmd_arg,
+        mcp_timeout_arg,
+        mcp_fail_open_arg,
+        use_general_context_arg,
+        use_episodic_mem_arg,
+        episodic_mem_pool_size_arg,
+        episodic_mem_top_k_arg,
         rag_node,
+        mcp_rag_node,
         normal_node,
         agentic_node,
     ])

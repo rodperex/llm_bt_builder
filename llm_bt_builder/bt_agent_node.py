@@ -23,13 +23,17 @@ import os
 import time
 from ament_index_python.packages import get_package_share_directory
 from llm_bt_builder.srv import GenerateBT
+try:
+    from llm_bt_builder.bt_validation import BTValidation
+except ModuleNotFoundError:
+    from bt_validation import BTValidation
 
-class BTAgentNode(Node):
+class BTAgentNode(BTValidation, Node):
     def __init__(self):
         super().__init__('llm_bt_agent')
 
         # === CONFIGURATION ===
-        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek
+        self.declare_parameter('llm_provider', 'gemini')  # gemini, openai, anthropic, ollama, deepseek, groq, sambanova, cerebras
         self.declare_parameter('execution_mode', 'api') 
         self.declare_parameter('model_id', 'gemini-2.5-flash')
         self.declare_parameter('model_cache_dir', './llm_models')
@@ -55,7 +59,10 @@ class BTAgentNode(Node):
                 'openai': ['OPENAI_API_KEY'],
                 'anthropic': ['ANTHROPIC_API_KEY'],
                 'deepseek': ['DEEPSEEK_API_KEY'],
-                'ollama': ['LLM_API_KEY']
+                'ollama': ['LLM_API_KEY'],
+                'groq': ['GROQ_API_KEY'],
+                'sambanova': ['SAMBANOVA_API_KEY'],
+                'cerebras': ['CEREBRAS_API_KEY']
             }
             
             env_vars = provider_to_env.get(self.llm_provider, ['LLM_API_KEY'])
@@ -79,12 +86,14 @@ class BTAgentNode(Node):
         self.decorators = self._extract_node_names(self.bt_decorator_nodes_yaml)
         
         # Special nodes that don't require validation
-        self.special_nodes = ['root', 'BehaviorTree', 'Blackboard', 'SetBlackboard', 'Wait',
-                              'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
+        self.special_nodes = ['root', 'BehaviorTree', 'AlwaysSuccess', 'AlwaysFailure', 'SubTree']
         
         # All structural nodes (for semantic validation skip)
         self.structural_nodes = set(
             self.decorators + self.control_nodes + self.special_nodes
+        )
+        self.structural_required_ports = self._parse_structural_required_ports(
+            self.bt_decorator_nodes_yaml, self.bt_control_nodes_yaml
         )
 
         # Local initialization (Omitted for brevity, same as before)
@@ -132,34 +141,102 @@ class BTAgentNode(Node):
             self.get_logger().error(f"❌ Error extracting node names: {e}")
             return []
 
+    def _extract_recovery_policy(self, objective_text):
+        """Read optional objective.recovery_policy without applying keyword heuristics."""
+        policy = {
+            'required': False,
+            'loop_required': False,
+            'retry_attempts': None,
+        }
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return policy
+
+        if not isinstance(data, dict):
+            return policy
+
+        recovery_blocks = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'recovery_policy' and isinstance(v, dict):
+                        recovery_blocks.append(v)
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+
+        for block in recovery_blocks:
+            if bool(block.get('required', False)):
+                policy['required'] = True
+            if bool(block.get('loop_until_success', False)):
+                policy['loop_required'] = True
+
+            raw_retry = block.get('retry_attempts', None)
+            if raw_retry is None or isinstance(raw_retry, bool):
+                continue
+
+            parsed_retry = None
+            if isinstance(raw_retry, (int, float)):
+                parsed_retry = int(raw_retry)
+            elif isinstance(raw_retry, str):
+                value = raw_retry.strip().lower()
+                if value in ('', 'null', 'none'):
+                    parsed_retry = None
+                elif value == 'forever':
+                    parsed_retry = 'forever'
+                else:
+                    try:
+                        parsed_retry = int(value)
+                    except ValueError:
+                        parsed_retry = None
+
+            if parsed_retry == 'forever':
+                policy['retry_attempts'] = 'forever'
+            elif parsed_retry is not None and parsed_retry > 0:
+                policy['retry_attempts'] = parsed_retry
+
+        return policy
+
+    def _extract_allow_forced_plan_fail(self, objective_text):
+        try:
+            data = yaml.safe_load(objective_text)
+        except Exception:
+            return False
+
+        found_values = []
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == 'allow_forced_plan_fail':
+                        found_values.append(bool(v))
+                    collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect(item)
+
+        collect(data)
+        return any(found_values)
+
     def generate_bt_callback(self, request, response):
         MAX_RETRIES = 25
 
         self.get_logger().info(f"🎯 Objective: '{request.objective}'")
-        
-        node_specs = {}
-        try:
-            robot_caps = yaml.safe_load(request.bt_nodes_yaml)
-            for node in robot_caps['bt_nodes']:
-                current_ports = []
-                # Get the list of ports (or empty list if none)
-                raw_ports = node.get('ports', [])
-                
-                if raw_ports:
-                    for p in raw_ports:
-                        p_name = p.get('key') or p.get('name')
-                        
-                        if p_name:
-                            current_ports.append(p_name)
-                        else:
-                            # If a port has neither key nor name, ignore but warn
-                            self.get_logger().warn(f"Unnamed port in node {node['name']}")
-
-                node_specs[node['name']] = current_ports
-                
-        except Exception as e:
-            self.get_logger().error(f"❌ Error processing YAML: {e}")
-            response.success = False; response.message = f"YAML Error: {e}"; return response
+        recovery_policy = self._extract_recovery_policy(request.objective)
+        node_specs = self._parse_capability_specs(request.bt_nodes_yaml)
+        known_bb_vars = self._extract_known_blackboard_vars(request.objective)
+        known_bb_var_types = self._extract_known_blackboard_var_types(request.objective)
+        required_output_vars = self._extract_required_output_vars(request.objective)
+        allow_forced_plan_fail = self._extract_allow_forced_plan_fail(request.objective)
+        if not node_specs:
+            response.success = False
+            response.message = "YAML Error: Could not parse BT node capabilities"
+            return response
 
         # Load template
         template = self.load_prompt_template()
@@ -209,16 +286,24 @@ class BTAgentNode(Node):
                 continue 
 
             # === PHASE 2: BEHAVORTREE STRUCTURE VALIDATION ===
-            is_structure_valid, structure_msg = self.validate_xml_bt(xml_result)
+            is_structure_valid, structure_msg, structure_hint = self.validate_xml_bt(xml_result)
             
             if not is_structure_valid:
                 self.get_logger().warn(f"⚠️ BT Structure Error: {structure_msg}")
                 messages.append({"role": "assistant", "content": xml_str})
-                messages.append({"role": "user", "content": f"BEHAVORTREE STRUCTURE ERROR: {structure_msg}. Fix the tree structure."})
+                messages.append({"role": "user", "content": f"BEHAVORTREE STRUCTURE ERROR: {structure_msg}. {structure_hint}"})
                 continue
 
             # === PHASE 3: SEMANTIC VALIDATION ===
-            is_bt_valid, semantic_msg = self.validate_bt_semantics(xml_result, node_specs)
+            is_bt_valid, semantic_msg, semantic_hint = self.validate_bt_semantics(
+                xml_result,
+                node_specs,
+                known_bb_vars,
+                known_bb_var_types,
+                required_output_vars,
+                recovery_policy,
+                allow_forced_plan_fail,
+            )
 
             if is_bt_valid:
                 self.get_logger().info("✅ XML Validated (Syntax and Semantics).")
@@ -230,7 +315,7 @@ class BTAgentNode(Node):
             else:
                 self.get_logger().warn(f"⚠️ Semantic Error: {semantic_msg}")
                 messages.append({"role": "assistant", "content": xml_str})
-                messages.append({"role": "user", "content": f"LOGICAL ERROR: {semantic_msg}. Only use the defined ports."})
+                messages.append({"role": "user", "content": f"LOGICAL ERROR: {semantic_msg}. {semantic_hint}"})
 
         response.success = False
         response.message = "Exceeded number of retries."
@@ -245,64 +330,27 @@ class BTAgentNode(Node):
             return False, str(e)
 
     def validate_xml_bt(self, root):
-        """Step 2: Validate BehaviorTree structural rules (decorators have 1 child, control nodes have children, etc.)"""
-        try:
-            for elem in root.iter():
-                children = list(elem)
-                
-                # Skip text/comments
-                if not isinstance(elem.tag, str):
-                    continue
-                
-                # Root and BehaviorTree should have exactly 1 child
-                if elem.tag in ['root', 'BehaviorTree']:
-                    if len(children) != 1:
-                        return False, f"<{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Decorators must have exactly 1 child
-                elif elem.tag in self.decorators:
-                    if len(children) != 1:
-                        return False, f"Decorator <{elem.tag}> must have exactly 1 child, found {len(children)}"
-                
-                # Control nodes must have at least 1 child
-                elif elem.tag in self.control_nodes:
-                    if len(children) < 1:
-                        return False, f"Control node <{elem.tag}> must have at least 1 child, found {len(children)}"
-                
-                # AlwaysSuccess/AlwaysFailure should have 0 children
-                elif elem.tag in ['AlwaysSuccess', 'AlwaysFailure']:
-                    if len(children) > 0:
-                        return False, f"<{elem.tag}> should not have children, found {len(children)}"
-            
-            return True, "OK"
-        except Exception as e:
-            return False, str(e)
+        return super().validate_xml_bt(root)
 
-    def validate_bt_semantics(self, root, node_specs):
-        """Step 3: Check if custom nodes exist in YAML and ports are correct."""
-        # Note: Structural validation is done in validate_xml_bt
-        
-        # Structural attributes allowed in any node
-        ignored_attrs = ['ID', 'name', 'num_attempts', 'server_name', 'server_timeout', 'path', '_success', '_failure'] 
-
-        for elem in root.iter():
-            # Skip structural BT.CPP nodes (using set for O(1) lookup)
-            if elem.tag in self.structural_nodes:
-                continue
-            
-            # 1. Node name check - must exist in YAML capabilities
-            if elem.tag not in node_specs:
-                return False, f"Node NOT allowed: <{elem.tag}>. Not in your skill list."
-            
-            # 2. Port check (attributes)
-            allowed_ports = node_specs[elem.tag]
-            for attr in elem.attrib:
-                if attr in ignored_attrs: continue
-                
-                if attr not in allowed_ports:
-                    return False, f"Node <{elem.tag}> has an invented port: '{attr}'. Valid ports: {allowed_ports}"
-
-        return True, "OK"
+    def validate_bt_semantics(
+        self,
+        root,
+        node_specs,
+        known_bb_vars=None,
+        known_bb_var_types=None,
+        required_outputs=None,
+        recovery_policy=None,
+        allow_forced_plan_fail=None,
+    ):
+        return super().validate_bt_semantics(
+            root,
+            node_specs,
+            known_bb_vars,
+            known_bb_var_types,
+            required_outputs,
+            recovery_policy,
+            allow_forced_plan_fail,
+        )
 
     def call_llm(self, messages):
         TIMEOUT_SEC = 180.0
@@ -349,9 +397,9 @@ class BTAgentNode(Node):
                         return None
                     
                 # =========================================================
-                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / DEEPSEEK / OLLAMA
+                # BRANCH 2: STANDARD OPENAI / ANTHROPIC / DEEPSEEK / OLLAMA / GROQ / SAMBANOVA / CEREBRAS
                 # =========================================================
-                elif self.llm_provider in ['openai', 'anthropic', 'deepseek', 'ollama']:
+                elif self.llm_provider in ['openai', 'anthropic', 'deepseek', 'ollama', 'groq', 'sambanova', 'cerebras']:
                     headers = {
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self.api_key}"
@@ -387,13 +435,19 @@ class BTAgentNode(Node):
                             base_url = 'https://api.anthropic.com'
                         elif self.llm_provider == 'deepseek':
                             base_url = 'https://api.deepseek.com'
-                        else:  # ollama
+                        elif self.llm_provider == 'groq':
+                            base_url = 'https://api.groq.com/openai'
+                        elif self.llm_provider == 'sambanova':
+                            base_url = 'https://api.sambanova.ai'
+                        elif self.llm_provider == 'cerebras':
+                            base_url = 'https://api.cerebras.ai'
+                        else:   # ollama
                             base_url = 'http://localhost:11434'
                     
                     # Build complete endpoint based on provider
                     if self.llm_provider == 'anthropic':
                         endpoint = f"{base_url}/v1/messages"
-                    else:  # openai, deepseek, ollama
+                    else:  # openai, deepseek, ollama, groq, sambanova, cerebras
                         endpoint = f"{base_url}/v1/chat/completions"
                     
                     resp = requests.post(endpoint, headers=headers, json=payload, timeout=TIMEOUT_SEC)

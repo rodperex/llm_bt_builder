@@ -1,0 +1,43 @@
+objective:
+
+  name: "check_availability"
+  
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must verify the availability of the ordered items against the internal list and confirm with the customer."
+  
+  skills_used:
+    - "Speak using text-to-speech"
+    - "Check whether requested items are available against a provided availability list"
+  
+  inputs:
+    - main_dish
+    - drink
+    - dessert
+  
+  outputs:
+    - unavailable_items
+
+  available_blackboard_vars:
+    - main_dish
+    - drink
+    - dessert
+  
+  recovery_policy:
+    required: false
+  
+  allow_forced_plan_fail: true
+
+  steps:
+      - step: "Check whether the order items are available against the availability list"
+      - step: "If all items are available, communicate it to the customer and say goodbye. If any item is unavailable, tell the customer the unavailable items, and force a plan fail."
+  
+  style:
+    - polite
+    - apologetic
+
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available desserts: cake;ice cream
+  Available locations are:
+    - main_kitchen
+    - bar

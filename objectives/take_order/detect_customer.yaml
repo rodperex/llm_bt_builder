@@ -1,0 +1,26 @@
+
+objective:
+  name: "detect_customer"
+  description: "A service robot acting as a waiter in a restaurant. Overall goal: Take the customer's full order and deliver food to the kitchen chef and drink to the bar waiter. In this step: The robot must spin in place until it identifies a customer ready to order."
+  outputs:
+    - detected_customer
+
+  steps:
+    - step: "Set the perception system to search for a specific target class"
+    - step: "Spin in place"
+    - step: "Detect and identify a target entity (person, object)"
+  constraints:
+    max_spin_duration: 60
+  style:
+    - attentive
+  recovery_policy:
+    required: true
+    loop_until_success: true
+    retry_attempts: forever
+
+useful_info: |
+  Available food: pizza;steak;salad
+  Available drinks: water;wine
+  Available locations are:
+    - main_kitchen
+    - bar

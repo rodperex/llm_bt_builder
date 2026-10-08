@@ -1,0 +1,16 @@
+objective:
+  name: "approach_and_greet_visitor"
+  description: "A service robot acting as a guide in a museum. Overall goal: Find a lost visitor, ask them what exhibit they are looking for, escort them to that exhibit, and report back to the information desk. In this step: The robot must approach the detected visitor, face them, and greet them politely."
+  inputs:
+    - detected_person
+  recovery_policy:
+    required: false
+    loop_until_success: false
+    retry_attempts: 3
+  steps:
+    - step: "Navigate to a dynamic destination provided via blackboard: {detected_person}"
+    - step: "Turn towards the detected visitor before speaking"
+    - step: "Speak using text-to-speech: 'Hello! How can I assist you today?'"
+  style:
+    - polite
+    - welcoming
