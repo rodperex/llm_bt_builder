@@ -812,6 +812,9 @@ class RagBTAgent(BTValidation, Node):
                         if exact_matches:
                             results.append(exact_matches[0])
 
+            # Joined outside the f-string: Python 3.10 (ROS 2 Humble) does not allow a backslash
+            # inside an f-string expression
+            rag_queries_str = '\n- '.join(rag_queries)
             rag_log = (
                 "\n========== RAG INPUT START =========="
                 f"\nK: {K}"
@@ -819,7 +822,7 @@ class RagBTAgent(BTValidation, Node):
                 f"\nMCP context removed: {removed_mcp_context}"
                 f"\nOriginal chars: {len(request.objective)} | Query chars: {len(rag_query)}"
                 f"\nPrimary retrieval query:\n{rag_query}"
-                f"\nFocused queries ({len(rag_queries)}):\n- {'\n- '.join(rag_queries)}"
+                f"\nFocused queries ({len(rag_queries)}):\n- {rag_queries_str}"
                 "\n=========== RAG INPUT END ==========="
             )
             self.get_logger().info(rag_log)
